@@ -20,6 +20,10 @@ pub struct Args {
     #[arg(short, long, value_name = "FILE")]
     pub output: Option<PathBuf>,
 
+    /// Treat DIR as the project root [default: the git toplevel, or the cwd]
+    #[arg(long, value_name = "DIR")]
+    pub root: Option<PathBuf>,
+
     /// Keep tracing until background processes started by the command exit
     #[arg(long)]
     pub wait: bool,

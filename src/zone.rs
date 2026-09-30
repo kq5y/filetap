@@ -114,7 +114,7 @@ impl Context {
             .map(|p| p.into_os_string().as_bytes().to_vec())
             .unwrap_or_else(|_| b"/".to_vec());
         let root = match root {
-            Some(r) => r.as_os_str().as_bytes().to_vec(),
+            Some(r) => crate::aggregate::normalize(r.as_os_str().as_bytes()),
             None => git_toplevel(&cwd).unwrap_or_else(|| cwd.clone()),
         };
         let var = |k: &str| {

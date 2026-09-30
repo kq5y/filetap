@@ -161,7 +161,13 @@ fn main() {
         let _ = d.flush();
     }
 
-    let mut ctx = zone::Context::from_env(None);
+    let root = args.root.as_deref().map(|r| {
+        std::path::absolute(r).unwrap_or_else(|e| {
+            eprintln!("filetap: {}: {}", r.display(), ioerr(&e));
+            exit(125);
+        })
+    });
+    let mut ctx = zone::Context::from_env(root.as_deref());
     let mut records = sink.agg.records;
     aggregate::enrich(&mut records);
     for r in &records {
