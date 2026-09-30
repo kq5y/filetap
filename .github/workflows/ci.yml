@@ -8,19 +8,23 @@ on:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-latest
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+    name: test (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
       # strace is only a reference for the scenario tests.
       - run: sudo apt-get update && sudo apt-get install -y strace
       - run: cargo fmt --check
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test
-
-  # No aarch64 runner yet; at least make sure it builds.
-  check-aarch64:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v5
-      - run: rustup target add aarch64-unknown-linux-gnu
-      - run: cargo clippy --target aarch64-unknown-linux-gnu -- -D warnings
