@@ -125,6 +125,8 @@ pub struct Context {
     config: Option<Vec<u8>>,
     caches: Vec<Vec<u8>>,
     toolchains: Vec<Vec<u8>>,
+    /// $PATH, as filetap got it; commands usually run with the same one.
+    pub path_dirs: Vec<Vec<u8>>,
 }
 
 impl Context {
@@ -143,7 +145,7 @@ impl Context {
         };
         // SAFETY: getuid can't fail.
         let uid = unsafe { libc::getuid() };
-        Context::new(
+        let mut ctx = Context::new(
             cwd,
             root,
             var("HOME").filter(|h| h != b"/"),
@@ -151,7 +153,16 @@ impl Context {
             var("TMPDIR"),
             var("XDG_CACHE_HOME"),
             var("XDG_CONFIG_HOME"),
-        )
+        );
+        if let Some(path) = env::var_os("PATH") {
+            ctx.path_dirs = path
+                .as_bytes()
+                .split(|&b| b == b':')
+                .filter(|d| d.first() == Some(&b'/'))
+                .map(crate::aggregate::normalize)
+                .collect();
+        }
+        ctx
     }
 
     pub fn new(
@@ -184,6 +195,7 @@ impl Context {
                 .iter()
                 .filter_map(|d| under_home(d))
                 .collect(),
+            path_dirs: Vec::new(),
             cwd,
             root,
             home,

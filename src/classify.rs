@@ -117,6 +117,16 @@ pub fn classify(records: &[Record], ctx: &Context) -> Vec<Class> {
     }
 
     find_probes(records, &mut classes);
+    // A command looked up in $PATH that isn't anywhere shows up as an error
+    // from the command itself; one line per PATH entry says nothing more.
+    for (r, c) in records.iter().zip(classes.iter_mut()) {
+        if c.bucket == Bucket::Missing
+            && c.hidden.is_none()
+            && parent(&r.path).is_some_and(|d| ctx.path_dirs.iter().any(|p| p == d))
+        {
+            c.hidden = Some(Hidden::Probe);
+        }
+    }
     classes
 }
 
@@ -245,6 +255,15 @@ fn find_probes(records: &[Record], classes: &mut [Class]) {
 fn sibling(records: &[Record], by_dir: &HashMap<&[u8], Vec<usize>>, path: &[u8]) -> Option<usize> {
     let dir = parent(path)?;
     let name = basename(path);
+    // SQLite checks for a journal or WAL next to every database it opens.
+    for suffix in [&b"-journal"[..], b"-wal", b"-shm"] {
+        if let Some(db) = name.strip_suffix(suffix)
+            && let Some(found) = by_dir.get(dir)
+            && let Some(&j) = found.iter().find(|&&j| basename(&records[j].path) == db)
+        {
+            return Some(j);
+        }
+    }
     let stem = match name.iter().rposition(|&b| b == b'.') {
         Some(dot) if dot > 0 && CODE_EXTS.contains(&&name[dot + 1..]) => &name[..dot],
         _ => name,
