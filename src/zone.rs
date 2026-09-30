@@ -200,16 +200,17 @@ impl Context {
             return;
         }
         let Some(prefix) = parent(bin) else { return };
-        let home_local = self
+        // Directories right under $HOME (~/.cargo, ~/.local, ~/go) hold the
+        // user's config next to their binaries.
+        let in_home = self
             .home
-            .as_ref()
-            .map(|h| [h.as_slice(), b"/.local"].concat());
+            .as_deref()
+            .is_some_and(|h| prefix == h || parent(prefix) == Some(h));
         let too_broad = prefix == b"/"
             || prefix == b"/usr"
             || prefix == b"/usr/local"
             || prefix == self.root.as_slice()
-            || Some(prefix) == self.home.as_deref()
-            || Some(prefix) == home_local.as_deref();
+            || in_home;
         if !too_broad && !self.toolchains.iter().any(|t| t == prefix) {
             self.toolchains.push(prefix.to_vec());
         }
@@ -471,8 +472,10 @@ mod tests {
         let mut c = ctx();
         c.exec_seen(b"/srv/node/bin/node");
         c.exec_seen(b"/home/u/.local/bin/tool");
+        c.exec_seen(b"/home/u/.cargo/bin/cargo");
         c.exec_seen(b"/usr/bin/sh");
         assert_eq!(c.zone(b"/srv/node/lib/x.js"), Zone::Toolchain);
         assert_eq!(c.zone(b"/home/u/.local/share/tool/cfg"), Zone::HomeConfig);
+        assert_eq!(c.zone(b"/home/u/.cargo/config.toml"), Zone::HomeConfig);
     }
 }
