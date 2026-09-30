@@ -1,7 +1,7 @@
 //! The report as text: one line per path, grouped by what happened to it,
 //! with big directories folded into one line.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ffi::OsStr;
 use std::io::{self, Write};
 use std::os::unix::ffi::OsStrExt;
@@ -15,6 +15,8 @@ use crate::zone::{Context, parent, under};
 const FOLD_MIN: usize = 10;
 /// Missing paths under one missing directory before they fold.
 const MISSING_FOLD_MIN: usize = 5;
+/// Directories one missing name was looked for in before they fold.
+const SAME_NAME_MIN: usize = 3;
 const MAX_LINES: usize = 40;
 const MAX_NOTE_COLUMN: usize = 40;
 
@@ -170,29 +172,57 @@ impl Report<'_> {
         }
 
         let mut walks: HashMap<&[u8], usize> = HashMap::new();
+        let mut names: HashMap<(u8, &[u8]), usize> = HashMap::new();
         if bucket == Bucket::Missing {
             for &p in &paths {
                 if let Some(t) = self.walk_tail(p) {
                     *walks.entry(t).or_default() += 1;
                 }
             }
+            for &p in &paths {
+                if self.walk_tail(p).is_none_or(|t| walks[t] == 1) {
+                    *names.entry((self.ctx.rank(p), basename(p))).or_default() += 1;
+                }
+            }
         }
 
-        // Group each entry with the others it folds into, keeping the order
-        // in which the groups first appear.
-        let mut order: Vec<Key> = Vec::new();
-        let mut groups: HashMap<Key, Vec<usize>> = HashMap::new();
-        for (&i, &p) in entries.iter().zip(&paths) {
-            let key = if self.classes[i].pinned {
-                Key::Path(p)
-            } else if bucket == Bucket::Missing {
+        let mut keys: Vec<Key> = entries
+            .iter()
+            .zip(&paths)
+            .map(|(&i, &p)| {
+                if self.classes[i].pinned {
+                    return Key::Path(p);
+                }
+                if bucket != Bucket::Missing {
+                    return self.fold_key(p, &counts).map_or(Key::Path(p), Key::Dir);
+                }
+                let name = (self.ctx.rank(p), basename(p));
                 match self.walk_tail(p) {
                     Some(t) if walks[t] > 1 => Key::Walk(t),
+                    _ if names[&name] >= SAME_NAME_MIN => Key::Name(name.0, name.1),
                     _ => self.missing_dir(p, &paths).map_or(Key::Path(p), Key::Dir),
                 }
-            } else {
-                self.fold_key(p, &counts).map_or(Key::Path(p), Key::Dir)
-            };
+            })
+            .collect();
+        // A directory that's listed itself joins the line its contents
+        // folded into.
+        let dirs: HashSet<Key> = keys
+            .iter()
+            .filter(|k| matches!(k, Key::Dir(_)))
+            .copied()
+            .collect();
+        for k in &mut keys {
+            if let Key::Path(p) = *k
+                && dirs.contains(&Key::Dir(p))
+            {
+                *k = Key::Dir(p);
+            }
+        }
+
+        // Keep the order in which the groups first appear.
+        let mut order: Vec<Key> = Vec::new();
+        let mut groups: HashMap<Key, Vec<usize>> = HashMap::new();
+        for (&i, &key) in entries.iter().zip(&keys) {
             groups
                 .entry(key)
                 .or_insert_with(|| {
@@ -209,10 +239,16 @@ impl Report<'_> {
                 let n = members.len();
                 match key {
                     Key::Path(_) => self.line(members[0]),
+                    Key::Walk(_) | Key::Name(..) if n == 1 => self.line(members[0]),
                     Key::Walk(_) => {
                         let mut line = self.line(members[0]);
                         let dirs = if n == 2 { "dir" } else { "dirs" };
                         line.note = format!("(and {} parent {dirs})", count(n - 1));
+                        line
+                    }
+                    Key::Name(..) => {
+                        let mut line = self.line(members[0]);
+                        line.note = format!("(and {} other dirs)", count(n - 1));
                         line
                     }
                     Key::Dir(dir) => Line {
@@ -385,6 +421,9 @@ enum Key<'a> {
     Dir(&'a [u8]),
     /// The same name looked up in the cwd and its parents.
     Walk(&'a [u8]),
+    /// The same name looked up in many directories of one area, like
+    /// `.gitattributes` in every directory git looks at.
+    Name(u8, &'a [u8]),
 }
 
 /// Directories strictly between `base` and `p`, shallowest first.
@@ -393,6 +432,10 @@ fn ancestors<'p>(p: &'p [u8], base: &[u8]) -> impl Iterator<Item = &'p [u8]> {
     (start..p.len())
         .filter(move |&i| p[i] == b'/')
         .map(move |i| &p[..i])
+}
+
+fn basename(p: &[u8]) -> &[u8] {
+    p.rsplit(|&b| b == b'/').next().unwrap_or(p)
 }
 
 /// 1,732
