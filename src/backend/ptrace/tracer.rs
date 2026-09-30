@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::ffi::{CStr, CString};
 use std::fs::{self, File};
-use std::io::{Read, Write};
+use std::io::{BufWriter, Read, Write};
 use std::os::fd::AsRawFd;
 use std::{process, ptr};
 
@@ -40,6 +40,7 @@ pub fn run(prog: &CStr, argv: &[CString], saved: &SavedSignals, tx: File) -> ! {
         }
     };
     t.send(&Msg::Started { pid: t.root });
+    t.flush();
     detach_stdio();
     t.trace();
     process::exit(0);
@@ -120,7 +121,7 @@ fn detach_stdio() {
 }
 
 struct State {
-    tx: Option<File>,
+    tx: Option<BufWriter<File>>,
     root: i32,
     root_resumed: bool,
     root_execed: bool,
@@ -136,7 +137,7 @@ struct State {
 impl State {
     fn new(root: i32, exec_err: File, tx: File) -> State {
         State {
-            tx: Some(tx),
+            tx: Some(BufWriter::with_capacity(1 << 16, tx)),
             root,
             root_resumed: false,
             root_execed: false,
@@ -148,6 +149,8 @@ impl State {
         }
     }
 
+    /// Buffered: the front only needs events by the time the root process
+    /// exits, and that message is flushed right away.
     fn send(&mut self, msg: &Msg) {
         if let Some(tx) = &mut self.tx {
             // The front is gone once it has printed the report; keep tracing
@@ -155,6 +158,14 @@ impl State {
             if tx.write_all(&msg.encode()).is_err() {
                 self.tx = None;
             }
+        }
+    }
+
+    fn flush(&mut self) {
+        if let Some(tx) = &mut self.tx
+            && tx.flush().is_err()
+        {
+            self.tx = None;
         }
     }
 
@@ -168,6 +179,7 @@ impl State {
         }
         let procs = self.procs;
         self.send(&Msg::Done { procs });
+        self.flush();
     }
 
     fn handle(&mut self, (pid, status): (i32, i32)) {
@@ -328,6 +340,7 @@ impl State {
                 self.send(&Msg::ExecFailed {
                     errno: i32::from_ne_bytes(buf),
                 });
+                self.flush();
                 return;
             }
         }
@@ -347,6 +360,7 @@ impl State {
             procs,
             running,
         });
+        self.flush();
     }
 }
 

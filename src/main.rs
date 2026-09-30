@@ -101,7 +101,7 @@ fn main() {
     };
 
     let mut rx = match ptrace::start(&prog, &args.command, &saved) {
-        Ok(t) => t,
+        Ok(t) => io::BufReader::with_capacity(1 << 16, t),
         Err(e) => {
             eprintln!("filetap: {e:#}");
             exit(125);
