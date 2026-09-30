@@ -148,14 +148,16 @@ fn bucket(r: &Record) -> Bucket {
     if o.read + o.list > 0 {
         return Bucket::Read;
     }
+    // Before Stat: "it's there but I can't open it" is the usual shape of a
+    // permission problem.
+    if r.errors.denied > 0 {
+        return Bucket::Denied;
+    }
     if o.stat > 0 {
         return Bucket::Stat;
     }
     if r.errors.missing > 0 {
         return Bucket::Missing;
-    }
-    if r.errors.denied > 0 {
-        return Bucket::Denied;
     }
     Bucket::Stat
 }
