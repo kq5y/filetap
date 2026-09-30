@@ -6,6 +6,8 @@ See what files a command actually touches.
 every process it started read, wrote, created, deleted and ran, and what
 they looked for and didn't find. One line per path.
 
+This is an alpha: options and the report format may still change.
+
 ```
 $ filetap --outside -- cargo build
    Compiling filetap v0.0.1 (/home/dev/src/filetap)
@@ -168,7 +170,7 @@ processes keep working, but what they do afterwards isn't in the report.
 
 ## Caveats
 
-- Linux only. aarch64 builds, but most testing is on x86_64. 32-bit programs
+- Linux only, x86_64 and aarch64 (both tested in CI). 32-bit programs
   aren't traced.
 - setuid programs lose their privileges: use `sudo filetap -- make install`,
   not `filetap -- sudo make install`.
