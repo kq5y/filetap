@@ -368,7 +368,13 @@ fn cont(pid: i32, sig: i32) {
     ptrace_resume(libc::PTRACE_CONT, pid, sig);
 }
 
-fn ptrace_resume(req: libc::c_uint, pid: i32, sig: i32) {
+// glibc declares ptrace's request as an unsigned int, musl as an int.
+#[cfg(target_env = "musl")]
+type Request = libc::c_int;
+#[cfg(not(target_env = "musl"))]
+type Request = libc::c_uint;
+
+fn ptrace_resume(req: Request, pid: i32, sig: i32) {
     // ESRCH means the tracee was killed while stopped; its exit will show up
     // in the next wait.
     // SAFETY: plain ptrace request; data carries the signal to inject.
@@ -395,7 +401,7 @@ struct SyscallInfo {
     data: [u64; 8],
 }
 
-const PTRACE_GET_SYSCALL_INFO: libc::c_uint = 0x420e;
+const PTRACE_GET_SYSCALL_INFO: Request = 0x420e;
 const PTRACE_SYSCALL_INFO_EXIT: u8 = 2;
 const PTRACE_SYSCALL_INFO_SECCOMP: u8 = 3;
 
