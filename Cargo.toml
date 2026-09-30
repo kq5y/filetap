@@ -1,10 +1,12 @@
 [package]
 name = "filetap"
-version = "0.1.0"
+version = "0.0.1"
 edition = "2024"
 description = "See what files a command actually touches"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/kq5y/filetap"
+keywords = ["strace", "ptrace", "files", "trace", "debugging"]
+categories = ["command-line-utilities", "development-tools::debugging"]
 
 [dependencies]
 anyhow = "1.0.104"
@@ -14,5 +16,5 @@ libc = "0.2.189"
 nix = { version = "0.31.3", features = ["ptrace", "signal", "process", "fs"] }
 serde_json = "1.0.151"
 
-[dev-dependencies]
-serde_json = "1.0.151"
+[profile.release]
+strip = true
