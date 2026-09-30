@@ -1,0 +1,48 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        arch: [x86_64, aarch64]
+    env:
+      TARGET: ${{ matrix.arch }}-unknown-linux-musl
+      # No C code, so rust-lld and musl's bundled crt objects are all it
+      # takes to link a static binary, cross or not.
+      CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER: rust-lld
+      CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER: rust-lld
+    steps:
+      - uses: actions/checkout@v5
+      - run: rustup target add $TARGET
+      - run: cargo build --release --locked --target $TARGET
+      # Named after `uname -m` so the install one-liner works on both.
+      - run: tar -czf filetap_linux_${{ matrix.arch }}.tar.gz -C target/$TARGET/release filetap
+      - uses: actions/upload-artifact@v4
+        with:
+          name: filetap_linux_${{ matrix.arch }}
+          path: filetap_linux_${{ matrix.arch }}.tar.gz
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+      - name: Release notes from CHANGELOG.md
+        run: |
+          awk -v v="${GITHUB_REF_NAME#v}" '/^## /{if (p) exit; p = ($2 == v); next} p' CHANGELOG.md > notes.md
+          test -s notes.md
+      - run: sha256sum filetap_linux_*.tar.gz > SHA256SUMS
+      - run: gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --notes-file notes.md filetap_linux_*.tar.gz SHA256SUMS
+        env:
+          GH_TOKEN: ${{ github.token }}
