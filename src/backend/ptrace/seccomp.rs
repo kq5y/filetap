@@ -18,6 +18,7 @@ const BPF_LD_W_ABS: u16 = 0x20;
 const BPF_JEQ_K: u16 = 0x15;
 #[cfg(target_arch = "x86_64")]
 const BPF_JGE_K: u16 = 0x35;
+const BPF_JSET_K: u16 = 0x45;
 const BPF_RET_K: u16 = 0x06;
 
 const SECCOMP_RET_ALLOW: u32 = 0x7fff_0000;
@@ -26,6 +27,16 @@ const SECCOMP_RET_TRACE: u32 = 0x7ff0_0000;
 // offsetof(struct seccomp_data, ...)
 const NR: u32 = 0;
 const ARCH: u32 = 4;
+/// The low half of args[i], on a little-endian machine.
+const fn arg(i: u32) -> u32 {
+    16 + 8 * i
+}
+
+/// fstat() is newfstatat(fd, "", AT_EMPTY_PATH) in newer glibc, and Rust's
+/// File::metadata() is statx(fd, "", AT_EMPTY_PATH). Neither names a file,
+/// and they come by the hundreds, so don't stop for them.
+const EMPTY_PATH_FLAGS: &[(i64, u32)] =
+    &[(libc::SYS_newfstatat, arg(3)), (libc::SYS_statx, arg(2))];
 
 fn stmt(code: u16, k: u32) -> libc::sock_filter {
     libc::sock_filter {
@@ -54,6 +65,14 @@ fn program() -> Vec<libc::sock_filter> {
         p.push(stmt(BPF_RET_K, SECCOMP_RET_ALLOW));
     }
     for &nr in TRACED {
+        if let Some(&(_, flags)) = EMPTY_PATH_FLAGS.iter().find(|(n, _)| *n == nr) {
+            p.push(jump(BPF_JEQ_K, nr as u32, 0, 4));
+            p.push(stmt(BPF_LD_W_ABS, flags));
+            p.push(jump(BPF_JSET_K, libc::AT_EMPTY_PATH as u32, 0, 1));
+            p.push(stmt(BPF_RET_K, SECCOMP_RET_ALLOW));
+            p.push(stmt(BPF_RET_K, SECCOMP_RET_TRACE));
+            continue;
+        }
         p.push(jump(BPF_JEQ_K, nr as u32, 0, 1));
         p.push(stmt(BPF_RET_K, SECCOMP_RET_TRACE));
     }
