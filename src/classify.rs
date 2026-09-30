@@ -46,6 +46,8 @@ pub enum Hidden {
     Pseudo,
     /// The target of a rename, already shown as `old -> new`.
     Moved,
+    /// Left out by --only, --outside or --hide.
+    Filtered,
 }
 
 #[derive(Debug, Clone)]
@@ -56,6 +58,8 @@ pub struct Class {
     pub atomic: bool,
     /// Failed lookups that ended up finding this path, in order.
     pub lookups_before: Vec<usize>,
+    /// Matched --show: never folded.
+    pub pinned: bool,
 }
 
 const CODE_EXTS: &[&[u8]] = &[
@@ -74,6 +78,7 @@ pub fn classify(records: &[Record], ctx: &Context) -> Vec<Class> {
                 hidden: hidden(r, bucket, zone),
                 atomic: false,
                 lookups_before: Vec::new(),
+                pinned: false,
             }
         })
         .collect();

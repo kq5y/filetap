@@ -3,6 +3,7 @@ mod backend;
 mod classify;
 mod cli;
 mod dump;
+mod filter;
 mod launch;
 mod text;
 mod zone;
@@ -39,6 +40,19 @@ fn main() {
             exit(e.exit_code());
         }
     };
+
+    // Before running anything, so a bad --root or glob doesn't waste a run.
+    let root = args.root.as_deref().map(|r| {
+        std::path::absolute(r).unwrap_or_else(|e| {
+            eprintln!("filetap: {}: {}", r.display(), ioerr(&e));
+            exit(125);
+        })
+    });
+    let mut ctx = zone::Context::from_env(root.as_deref());
+    let filter = filter::Filter::new(&args, &ctx).unwrap_or_else(|e| {
+        eprintln!("filetap: {e}");
+        exit(125);
+    });
 
     let saved = SavedSignals::capture();
     // Like time(1): Ctrl-C is for the command, which gets it anyway because
@@ -161,13 +175,6 @@ fn main() {
         let _ = d.flush();
     }
 
-    let root = args.root.as_deref().map(|r| {
-        std::path::absolute(r).unwrap_or_else(|e| {
-            eprintln!("filetap: {}: {}", r.display(), ioerr(&e));
-            exit(125);
-        })
-    });
-    let mut ctx = zone::Context::from_env(root.as_deref());
     let mut records = sink.agg.records;
     aggregate::enrich(&mut records);
     for r in &records {
@@ -175,7 +182,8 @@ fn main() {
             ctx.exec_seen(&r.path);
         }
     }
-    let classes = classify::classify(&records, &ctx);
+    let mut classes = classify::classify(&records, &ctx);
+    filter.apply(&records, &mut classes, &ctx);
 
     let (mut out, shared) = report_writer(args.output.as_deref());
     if shared {
@@ -189,6 +197,7 @@ fn main() {
         elapsed,
         procs,
         &running,
+        &filter.described,
     );
     if gave_up {
         let _ = writeln!(
@@ -275,6 +284,7 @@ fn header(
     elapsed: Duration,
     procs: u32,
     running: &[(i32, String)],
+    filters: &[String],
 ) -> io::Result<()> {
     let cmd = command_line(command);
     let how = match exit {
@@ -282,9 +292,14 @@ fn header(
         Exit::Signal(s) => format!("was killed by {}", signame(s)),
     };
     let plural = if procs == 1 { "process" } else { "processes" };
+    let filtered = if filters.is_empty() {
+        String::new()
+    } else {
+        format!(" (filtered: {})", filters.join(", "))
+    };
     writeln!(
         w,
-        "filetap: {cmd} {how} after {:.2}s ({procs} {plural})",
+        "filetap: {cmd} {how} after {:.2}s ({procs} {plural}){filtered}",
         elapsed.as_secs_f64()
     )?;
     if !running.is_empty() {

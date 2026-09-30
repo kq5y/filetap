@@ -72,7 +72,7 @@ impl Report<'_> {
     fn visible(&self, i: usize) -> bool {
         match self.classes[i].hidden {
             None => true,
-            Some(Hidden::Moved) => false,
+            Some(Hidden::Moved | Hidden::Filtered) => false,
             Some(_) => self.all,
         }
     }
@@ -132,7 +132,9 @@ impl Report<'_> {
         let mut order: Vec<Key> = Vec::new();
         let mut groups: HashMap<Key, Vec<usize>> = HashMap::new();
         for (&i, &p) in entries.iter().zip(&paths) {
-            let key = if bucket == Bucket::Missing {
+            let key = if self.classes[i].pinned {
+                Key::Path(p)
+            } else if bucket == Bucket::Missing {
                 match self.walk_tail(p) {
                     Some(t) if walks[t] > 1 => Key::Walk(t),
                     _ => self.missing_dir(p, &paths).map_or(Key::Path(p), Key::Dir),
@@ -236,7 +238,9 @@ impl Report<'_> {
                         Hidden::Virtual => "virtual",
                         Hidden::Probe => "lookup probes",
                         Hidden::Temp => "temp files",
-                        Hidden::Stat | Hidden::Pseudo | Hidden::Moved => continue,
+                        Hidden::Stat | Hidden::Pseudo | Hidden::Moved | Hidden::Filtered => {
+                            continue;
+                        }
                     };
                     *hidden.entry(what).or_default() += 1;
                 }
