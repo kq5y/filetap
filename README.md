@@ -2,28 +2,30 @@
 
 See what files a command actually touches.
 
-`filetap -- <command>` runs the command, follows it and everything it starts,
-and when it exits prints which files were read, written, created, deleted and
-run, and which were looked for and not found. One line per path, not a log of
-every syscall.
-
-Here is `cargo build` in this repository, showing only what's outside it:
+`filetap -- <command>` runs a command and, when it exits, prints what it and
+every process it started read, wrote, created, deleted and ran, and what
+they looked for and didn't find. One line per path.
 
 ```
 $ filetap --outside -- cargo build
-    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.18s
+   Compiling filetap v0.0.1 (/home/dev/src/filetap)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1.57s
 
-filetap: cargo build exited 0 after 0.23s (1 process) (filtered: --outside)
+filetap: cargo build exited 0 after 1.60s (5 processes) (filtered: --outside)
+
+EXEC
+  ~/.cargo/bin/cargo
 
 READ
   ~/.gitconfig
+  ~/.cargo/registry/  (145 files)
 
 MISSING
+  ~/src/rust-toolchain       (and 3 parent dirs)
+  ~/src/rust-toolchain.toml  (and 3 parent dirs)
+  ~/src/.cargo/config        (and 3 parent dirs)
+  ~/src/.cargo/config.toml   (and 3 parent dirs)
   ~/.config/git/config
-  /home/user/rust-toolchain       (and 2 parent dirs)
-  /home/user/rust-toolchain.toml  (and 2 parent dirs)
-  /home/user/.cargo/config        (and 2 parent dirs)
-  /home/user/.cargo/config.toml   (and 2 parent dirs)
   /etc/gitconfig
 
 WRITE
@@ -32,15 +34,13 @@ WRITE
   ~/.cargo/.package-cache-mutate
 
 Summary
-  1 read, 3 written, 14 missing
-  not shown: 11 lookup probes (use -a)
+  146 read, 3 written, 18 missing, 1 program run
+  not shown: 28 lookup probes, 3 temp files (use -a)
 ```
 
-Cargo reads my git config, and looks for `rust-toolchain` and
-`.cargo/config.toml` in the repo and in every directory above it, up to `/`.
-None of those exist on this machine. If one turned up in `/home` on someone
-else's, their build would be different from mine and nothing in the repo
-would say why. Finding that kind of thing is what filetap is for.
+Cargo looks for `rust-toolchain` and `.cargo/config.toml` in every directory
+from the repo up to `/`. None exist here, but one in `~/src` on another
+machine would change the build there.
 
 ## Install
 
@@ -48,136 +48,141 @@ would say why. Finding that kind of thing is what filetap is for.
 curl -L https://github.com/kq5y/filetap/releases/latest/download/filetap_linux_$(uname -m).tar.gz | tar xz
 ```
 
-The release binaries are static, for x86_64 and aarch64. To build from
-source: `cargo install --git https://github.com/kq5y/filetap`.
+or `cargo install --git https://github.com/kq5y/filetap`.
 
-Linux 5.3 or later. It doesn't need root and doesn't change anything on the
-system.
+- Linux 5.3 or later, x86_64 or aarch64
+- Static binary, no root, nothing to set up
 
-## More examples
-
-What did an install change? `-w` shows only created, written, renamed and
-deleted files:
+## Usage
 
 ```
-$ filetap -w -- .venv/bin/pip install --no-cache-dir -q six
+filetap [OPTIONS] -- <COMMAND> [ARGS...]
+```
 
-filetap: .venv/bin/pip install --no-cache-dir -q six exited 0 after 3.40s (19 processes) (filtered: --writes)
+| Option | |
+| --- | --- |
+| `--outside` | Only paths outside the project, leaving out system files |
+| `-w`, `--writes` | Only created, written, renamed and deleted files |
+| `-m`, `--missing` | Only what wasn't found or wasn't allowed |
+| `--only KINDS` | Only these sections: `read,write,create,delete,rename,exec,missing,denied` |
+| `--hide GLOB` | Leave out matching paths |
+| `--show GLOB` | Always list matching paths, unfolded |
+| `-a`, `--all` | Nothing hidden, nothing folded |
+| `-v`, `--verbose` | Which programs touched each path, and what they tried first |
+| `--json` | Everything, including what's hidden and why |
+| `-o FILE` | Write the report to FILE (default stderr, `-` for stdout) |
+| `--wait` | Also wait for processes the command left running |
+| `--root DIR` | Project root (default: git toplevel, else the cwd) |
+
+Globs starting with `/`, `~/` or `./` are absolute, home-relative or
+root-relative. `*.log` matches a file name anywhere.
+
+filetap exits with the command's status (128+N if it was killed by signal
+N), or 125 if filetap itself failed, 126 if the command couldn't be run,
+127 if it wasn't found.
+
+## Examples
+
+What did an install change?
+
+```
+$ filetap -w -- .venv/bin/pip install -q requests
+
+filetap: .venv/bin/pip install -q requests exited 0 after 4.00s (18 processes) (filtered: --writes)
 
 CREATE
-  ./.venv/lib/python3.11/site-packages/  (11 files)
+  ./.venv/   (239 files)
+  ~/.cache/  (102 files)
 
 Summary
-  11 created
+  341 created
 ```
 
-Everything went into the venv. The 11 files are folded into their directory;
-`-a` lists them.
-
-What did it look for and not find? `-m`:
+What did it look for and not find?
 
 ```
 $ filetap -m -- git status --short
 
-filetap: git status --short exited 0 after 0.02s (1 process) (filtered: --missing)
+filetap: git status --short exited 0 after 0.03s (1 process) (filtered: --missing)
 
 MISSING
+  ./.gitattributes  (and 7 other dirs)
+  ~/.config/git/attributes
   ~/.config/git/ignore
   /etc/gitconfig
+  /etc/gitattributes
 
 Summary
-  2 missing, no files modified
-  not shown: 1 system/toolchain, 27 lookup probes (use -a)
+  12 missing, no files modified
+  not shown: 2 system/toolchain, 29 lookup probes (use -a)
 ```
 
-`--only exec` shows which programs were run, `--json` writes everything
-(hidden entries included, with the reason they were hidden) for other tools,
-and `-v` adds which programs touched each path and what they tried before
-finding it. `filetap --help` has the rest.
+## The report
 
-## Reading the report
+| Section | |
+| --- | --- |
+| EXEC | Programs run |
+| READ | Files and directories read |
+| MISSING | Looked for, not there |
+| DENIED | There, but not allowed |
+| CREATE | Didn't exist before, exists now |
+| WRITE | Existed and was changed, including by renaming a new file over it (`(atomic)`) |
+| RENAME | Moved, as `old -> new` |
+| DELETE | Existed and is gone |
 
-Each path is listed once, under the thing that happened to it, in this order:
-EXEC, READ, MISSING, DENIED, then CREATE, WRITE, RENAME, DELETE. Within a
-section, paths in the current directory come first, then the rest of the
-project, then your home directory, then everything else.
+Each path is listed once. Paths in the current directory come first, then
+the rest of the project, your home directory, and the rest of the system.
 
-A lot is left out by default, and the summary says how much:
+Left out unless you ask with `-a`, and counted in the summary:
 
-- Reads of system files and toolchains (`/usr`, `~/.rustup`, `~/.nvm`, a
-  Python or Node install found from where it was run), and of `/proc`,
-  `/sys` and `/dev`.
-- Lookups that were part of a search: `PATH`, module resolution trying
-  `foo.ts` before `foo.tsx`, a config file tried in several places before it
-  was found. These aren't missing, they're how the program found what it
-  used.
-- Files that were created and removed again before the command ended.
+- reads of system files and toolchains (`/usr`, `~/.rustup`, `~/.nvm`), and
+  of `/proc`, `/sys` and `/dev`
+- failed lookups that were part of a search: `PATH`, module resolution,
+  a config file tried in several places before one was found
+- files created and removed again during the run
 
-Changes are never left out, wherever they are. A write under `/usr/local` or
-`/etc` is listed like one in your project. Directories with many entries fold
-into one line, and a file looked for in the current directory and all its
-parents shows once. `-a` turns all of this off. `--show GLOB` does it for
-matching paths only, `--hide GLOB` goes the other way.
+Changes are always listed, wherever they are. Directories with many entries
+fold into one line, and so does a name looked up in many directories.
 
 ## Background processes
 
-If the command leaves something running (a daemon, a build server,
-anything started with `setsid`), filetap still reports as soon as the command
-itself exits, and says what's left:
-
-```
-filetap: 1 background process still running (sleep[4121]); their later file access is not in this report
-```
-
-Those processes keep being traced in the background so they work normally,
-but what they do from then on isn't reported. `--wait` waits for them before
-printing the report; Ctrl-C while it waits prints what it has so far.
+If the command leaves processes running (a daemon, a build server), filetap
+reports when the command exits and says what's still running. Those
+processes keep working, but what they do afterwards isn't in the report.
+`--wait` waits for them first.
 
 ## How it works
 
-filetap forks a tracer process, which starts the command under ptrace with a
-seccomp filter. The filter stops the command only on file-related syscalls:
-open, stat, exec, rename, unlink, mkdir and a few dozen others. Everything
-else runs at full speed.
-
-At each stop, before the kernel runs the call, the tracer reads the
-arguments, resolves relative paths through `/proc/<pid>/cwd` and
-`/proc/<pid>/fd`, and for calls that can create a file checks whether it's
-already there. That's how a file created by `O_CREAT` is told apart from an
-existing one being overwritten. It then lets the call run and picks up the
-result when it returns.
-
-The report is built from those events once the command exits. `read` and
-`write` aren't traced: a file opened for writing counts as written.
-
-The tracer is a separate process so it can outlive the report. When the
-command exits, filetap prints and returns to the shell, and the tracer stays
-behind until anything the command left running is gone. It can't just
-detach from them: the seccomp filter stays with a process for good, and
-without a tracer every filtered syscall would fail.
+- filetap forks a tracer, which starts the command under ptrace with a
+  seccomp filter that stops it only on file syscalls (open, stat, exec,
+  rename, unlink, mkdir and about 40 more).
+- At each stop the tracer reads the path, resolves it against the process's
+  cwd or dirfd through `/proc`, and, for calls that can create a file,
+  checks whether it already exists before the kernel runs the call. That's
+  how CREATE and WRITE are told apart.
+- `read` and `write` aren't traced. A file opened for writing counts as
+  written.
+- The tracer is a separate process so it can stay behind for anything the
+  command left running. A process with the seccomp filter can't run without
+  a tracer.
 
 ## Caveats
 
-- Linux only. x86_64 is what I use it on; aarch64 builds and should work
-  but has seen less use. 32-bit programs on x86_64 aren't traced.
-- setuid programs don't get their privileges under filetap, so
-  `filetap -- sudo make install` doesn't work. `sudo filetap -- make install`
-  does.
-- It can't trace a debugger or another tracer (`gdb`, `strace`).
-- Access through io_uring, or through file descriptors that were already open
-  when the command started, isn't seen.
-- READ and WRITE mean the file was opened to read or write, not that any
-  bytes moved.
-- `..` in a path is resolved without looking at symlinks.
-- Paths in `--json` include your home directory, which has your user name
-  in it.
-- It costs a stop per file syscall. A build that spends its time compiling
-  hardly notices. A script that imports and reads the whole Python standard
-  library (about 13,000 file syscalls in 1.3 seconds) takes about twice as
-  long, which is also what strace takes.
+- Linux only. aarch64 builds, but most testing is on x86_64. 32-bit programs
+  aren't traced.
+- setuid programs lose their privileges: use `sudo filetap -- make install`,
+  not `filetap -- sudo make install`.
+- A debugger or tracer (`gdb`, `strace`) can't run under filetap.
+- Not seen: access through io_uring, or through file descriptors inherited
+  from before the command started.
+- `..` in paths is resolved without looking at symlinks.
+- `--json` output has full paths, including your home directory.
+- Each file syscall costs a stop. Reading the whole Python standard library
+  (13,000 file syscalls in 1.3 s) takes about twice as long, the same as
+  under strace.
 
-If something is reported wrong, `--dump-events FILE` saves what the tracer
-saw before any of the above was applied; attaching it to an issue helps.
+If something is reported wrong, `--dump-events FILE` saves the raw events;
+please attach it to the issue.
 
 ## License
 
