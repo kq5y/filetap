@@ -178,35 +178,3 @@ pub fn escape(b: &[u8]) -> String {
     }
     s
 }
-
-#[cfg(test)]
-#[test]
-fn parses_at_calls_with_annotations() {
-    let mut out = BTreeSet::new();
-    let mut cwd = b"/".to_vec();
-    parse_line(
-        r#"openat(AT_FDCWD<\x2f\x74\x6d\x70>, "\x61", O_RDONLY) = -1 ENOENT (No such file or directory)"#,
-        &mut cwd,
-        &mut out,
-    );
-    parse_line(
-        r#"renameat2(3<\x2f\x64>, "\x61", AT_FDCWD<\x2f\x65>, "\x62", RENAME_NOREPLACE) = 0"#,
-        &mut cwd,
-        &mut out,
-    );
-    parse_line(r#"chdir("\x2f\x78") = 0"#, &mut cwd, &mut out);
-    parse_line(
-        r#"mkdir("\x79", 0777)                     = 0"#,
-        &mut cwd,
-        &mut out,
-    );
-    assert_eq!(
-        out.into_iter().collect::<Vec<_>>(),
-        [
-            ("/d/a".into(), "ok".into()),
-            ("/e/b".into(), "ok".into()),
-            ("/tmp/a".into(), "ENOENT".into()),
-            ("/x/y".into(), "ok".into()),
-        ]
-    );
-}

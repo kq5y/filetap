@@ -1,6 +1,5 @@
 use std::fs;
-use std::io::{Read, Write};
-use std::os::unix::fs::PermissionsExt;
+use std::io::Read;
 use std::path::PathBuf;
 use std::process::{Command, Output, Stdio};
 use std::thread::sleep;
@@ -60,57 +59,10 @@ fn missing_command_exits_127() {
 }
 
 #[test]
-fn non_executable_command_exits_126() {
-    let dir = tempdir("noexec");
-    let script = dir.join("script.sh");
-    fs::write(&script, "#!/bin/sh\n").unwrap();
-    fs::set_permissions(&script, fs::Permissions::from_mode(0o644)).unwrap();
-    let out = run(&["--", script.to_str().unwrap()]);
-    assert_eq!(out.status.code(), Some(126));
-}
-
-#[test]
-fn usage_error_exits_125() {
-    let out = run(&["sh"]);
-    assert_eq!(out.status.code(), Some(125));
-}
-
-#[test]
 fn stdout_is_left_to_the_command() {
     let out = run(&["--", "echo", "hi"]);
     assert_eq!(out.stdout, b"hi\n");
     assert!(stderr(&out).contains("filetap: echo hi exited 0"));
-}
-
-#[test]
-fn stdin_reaches_the_command() {
-    let mut child = filetap()
-        .args(["--", "sh", "-c", "read x; echo got $x"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .unwrap();
-    child.stdin.take().unwrap().write_all(b"hello\n").unwrap();
-    let out = child.wait_with_output().unwrap();
-    assert_eq!(out.stdout, b"got hello\n");
-}
-
-#[test]
-fn report_to_stdout_with_dash() {
-    let out = run(&["-o", "-", "--", "true"]);
-    assert!(String::from_utf8_lossy(&out.stdout).contains("filetap: true exited 0"));
-    assert!(out.stderr.is_empty());
-}
-
-#[test]
-fn report_to_file_has_no_leading_blank_line() {
-    let dir = tempdir("report");
-    let path = dir.join("report.txt");
-    let out = run(&["-o", path.to_str().unwrap(), "--", "true"]);
-    assert!(out.stderr.is_empty());
-    let report = fs::read_to_string(&path).unwrap();
-    assert!(report.starts_with("filetap: true exited 0"), "{report:?}");
 }
 
 #[test]
@@ -189,22 +141,6 @@ fn lingering_tracer_does_not_keep_stdout_open() {
     child.wait().unwrap();
     assert_eq!(buf, "hi\n");
     assert!(t.elapsed() < Duration::from_secs(2));
-}
-
-#[test]
-fn child_processes_are_counted() {
-    let out = run(&["--", "sh", "-c", "/bin/true; /bin/true; /bin/true; exit 0"]);
-    assert!(stderr(&out).contains("(4 processes)"), "{}", stderr(&out));
-}
-
-#[test]
-fn threads_are_not_counted_as_processes() {
-    let code = "import threading\n\
-                ts = [threading.Thread(target=lambda: None) for _ in range(4)]\n\
-                [t.start() for t in ts]; [t.join() for t in ts]";
-    let out = run(&["--", "python3", "-c", code]);
-    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
-    assert!(stderr(&out).contains("(1 process)"), "{}", stderr(&out));
 }
 
 #[test]

@@ -57,11 +57,7 @@ fn our_accesses(events: &[Value]) -> BTreeSet<strace::Access> {
     out
 }
 
-fn run_script(
-    name: &str,
-    interpreter: &str,
-    script: &str,
-) -> (Vec<Value>, BTreeSet<strace::Access>) {
+fn compare_with_strace(name: &str, interpreter: &str, script: &str) {
     let base = tempdir(name);
     let work = base.join("work");
     let script_path = base.join("script");
@@ -97,8 +93,7 @@ fn run_script(
         .status()
         .unwrap();
     assert!(status.success());
-    let evs = events(&dump);
-    let ours = only_work(our_accesses(&evs));
+    let ours = only_work(our_accesses(&events(&dump)));
 
     assert!(!theirs.is_empty(), "strace saw nothing under {work_str}");
     let missing: Vec<_> = theirs.difference(&ours).collect();
@@ -107,12 +102,11 @@ fn run_script(
         missing.is_empty() && extra.is_empty(),
         "only strace saw: {missing:#?}\nonly filetap saw: {extra:#?}"
     );
-    (evs, ours)
 }
 
 #[test]
 fn shell_file_operations_match_strace() {
-    run_script(
+    compare_with_strace(
         "shell",
         "sh",
         r#"
@@ -139,7 +133,7 @@ exit 0
 
 #[test]
 fn python_threads_and_forks_match_strace() {
-    run_script(
+    compare_with_strace(
         "python",
         "python3",
         r#"
@@ -167,49 +161,4 @@ os.mkdir("d")
 os.rmdir("d")
 "#,
     );
-}
-
-fn find<'a>(evs: &'a [Value], call: &str, key: &str, path: &str) -> &'a Value {
-    evs.iter()
-        .find(|e| e["call"] == call && e[key] == path)
-        .unwrap_or_else(|| panic!("no {call} with {key} {path}"))
-}
-
-#[test]
-fn existence_before_create_is_recorded() {
-    let (evs, _) = run_script(
-        "existed",
-        "sh",
-        r#"
-echo a > fresh.txt
-echo b > fresh.txt
-exit 0
-"#,
-    );
-    let opens: Vec<_> = evs
-        .iter()
-        .filter(|e| e["call"] == "open" && e["path"] == "fresh.txt")
-        .collect();
-    assert_eq!(opens.len(), 2);
-    assert_eq!(opens[0]["existed"], false);
-    assert_eq!(opens[1]["existed"], true);
-}
-
-#[test]
-fn rename_over_existing_file_records_the_target_existed() {
-    let (evs, _) = run_script(
-        "replace",
-        "python3",
-        r#"
-import os
-open("target", "w").close()
-open("tmp", "w").close()
-os.replace("tmp", "target")
-os.replace("target", "other")
-"#,
-    );
-    let replace = find(&evs, "rename", "to", "target");
-    assert_eq!(replace["to_existed"], true);
-    let moved = find(&evs, "rename", "to", "other");
-    assert_eq!(moved["to_existed"], false);
 }

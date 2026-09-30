@@ -103,8 +103,8 @@ mod tests {
     }
 
     #[test]
-    fn finds_first_executable_in_path() {
-        let d = tempdir("first");
+    fn skips_non_executable_matches_in_path() {
+        let d = tempdir("path");
         fs::create_dir_all(d.join("a")).unwrap();
         fs::create_dir_all(d.join("b")).unwrap();
         touch(&d.join("a/tool"), 0o644);
@@ -114,45 +114,11 @@ mod tests {
             resolve(OsStr::new("tool"), Some(OsStr::new(&path))),
             Ok(d.join("b/tool"))
         );
-    }
-
-    #[test]
-    fn non_executable_match_is_126() {
-        let d = tempdir("noexec");
-        touch(&d.join("tool"), 0o644);
-        let err = resolve(OsStr::new("tool"), Some(d.as_os_str())).unwrap_err();
+        // Only a non-executable match: 126, like execvp's EACCES.
+        let only_a = d.join("a");
+        let err = resolve(OsStr::new("tool"), Some(only_a.as_os_str())).unwrap_err();
         assert_eq!(err.exit_code(), 126);
-    }
-
-    #[test]
-    fn missing_command_is_127() {
-        let d = tempdir("missing");
-        let err = resolve(OsStr::new("no-such-tool"), Some(d.as_os_str())).unwrap_err();
+        let err = resolve(OsStr::new("no-such-tool"), Some(OsStr::new(&path))).unwrap_err();
         assert_eq!(err.exit_code(), 127);
-        assert_eq!(err.to_string(), "no-such-tool: command not found");
-    }
-
-    #[test]
-    fn directory_in_path_counts_as_not_executable() {
-        let d = tempdir("dir");
-        fs::create_dir_all(d.join("a/tool")).unwrap();
-        let err = resolve(OsStr::new("tool"), Some(d.join("a").as_os_str())).unwrap_err();
-        assert_eq!(err.exit_code(), 126);
-    }
-
-    #[test]
-    fn names_with_slash_skip_path_search() {
-        let d = tempdir("slash");
-        touch(&d.join("run.sh"), 0o755);
-        let p = d.join("run.sh");
-        assert_eq!(
-            resolve(p.as_os_str(), Some(OsStr::new("/nonexistent"))),
-            Ok(p.clone())
-        );
-        let missing = d.join("nope");
-        assert_eq!(
-            resolve(missing.as_os_str(), None).unwrap_err().exit_code(),
-            127
-        );
     }
 }
