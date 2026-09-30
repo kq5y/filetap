@@ -246,11 +246,23 @@ fn main() {
             "filetap: the command set up io_uring; file access through it is not in this report"
         );
     }
+    let names = sink
+        .agg
+        .execs
+        .iter()
+        .map(|e| {
+            let name = e.path.rsplit(|&b| b == b'/').next().unwrap_or(&e.path);
+            (e.pid, String::from_utf8_lossy(name).into_owned())
+        })
+        .collect();
     let report = text::Report {
         records: &records,
         classes: &classes,
         ctx: &ctx,
         all: args.all,
+        verbose: args.verbose,
+        names,
+        color: use_color(args.color, args.output.as_deref()),
     };
     let _ = report.write(&mut out);
     let _ = out.flush();
@@ -290,6 +302,25 @@ impl Sink {
             let _ = dump::write_event(d, ev);
         }
         self.agg.add(ev, self.started.elapsed().as_millis() as u64);
+    }
+}
+
+fn use_color(when: cli::Color, output: Option<&Path>) -> bool {
+    let fd = match output {
+        None => libc::STDERR_FILENO,
+        Some(p) if p == Path::new("-") => libc::STDOUT_FILENO,
+        Some(_) => return when == cli::Color::Always,
+    };
+    match when {
+        cli::Color::Always => true,
+        cli::Color::Never => false,
+        cli::Color::Auto => {
+            // https://no-color.org
+            let no_color = std::env::var_os("NO_COLOR").is_some_and(|v| !v.is_empty());
+            let dumb = std::env::var_os("TERM").is_some_and(|t| t == "dumb");
+            // SAFETY: isatty only looks at the fd.
+            !no_color && !dumb && unsafe { libc::isatty(fd) } == 1
+        }
     }
 }
 

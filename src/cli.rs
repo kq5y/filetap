@@ -1,7 +1,7 @@
 use std::ffi::OsString;
 use std::path::PathBuf;
 
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -42,6 +42,14 @@ pub struct Args {
     #[arg(short, long)]
     pub all: bool,
 
+    /// Also show which programs touched each path and what they looked for
+    /// first
+    #[arg(short, long)]
+    pub verbose: bool,
+
+    #[arg(long, value_name = "WHEN", default_value = "auto")]
+    pub color: Color,
+
     /// Write the report as JSON, hidden entries included
     #[arg(long)]
     pub json: bool,
@@ -64,4 +72,11 @@ pub struct Args {
 
     #[arg(last = true, required = true, value_name = "COMMAND")]
     pub command: Vec<OsString>,
+}
+
+#[derive(ValueEnum, Clone, Copy, Debug, PartialEq)]
+pub enum Color {
+    Auto,
+    Always,
+    Never,
 }

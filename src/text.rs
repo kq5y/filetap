@@ -42,7 +42,17 @@ pub struct Report<'a> {
     pub ctx: &'a Context,
     /// -a: nothing hidden, nothing folded.
     pub all: bool,
+    /// -v: which programs touched each path, and what they tried first.
+    pub verbose: bool,
+    /// pid -> the program it last exec'd, for -v.
+    pub names: HashMap<i32, String>,
+    pub color: bool,
 }
+
+const BOLD: &str = "\x1b[1m";
+const YELLOW: &str = "\x1b[33m";
+const RED: &str = "\x1b[31m";
+const RESET: &str = "\x1b[0m";
 
 impl Report<'_> {
     pub fn write(&self, w: &mut dyn Write) -> io::Result<()> {
@@ -62,11 +72,25 @@ impl Report<'_> {
             } else {
                 self.fold(bucket, &entries)
             };
+            let color = match bucket {
+                _ if !self.color => "",
+                Bucket::Missing => YELLOW,
+                Bucket::Denied => RED,
+                _ => "",
+            };
             writeln!(w)?;
-            writeln!(w, "{title}")?;
-            write_lines(w, &lines, !self.all)?;
+            writeln!(w, "{}", self.bold(title))?;
+            write_lines(w, &lines, !self.all, color)?;
         }
         self.summary(w)
+    }
+
+    fn bold(&self, s: &str) -> String {
+        if self.color {
+            format!("{BOLD}{s}{RESET}")
+        } else {
+            s.to_string()
+        }
     }
 
     fn visible(&self, i: usize) -> bool {
@@ -90,18 +114,45 @@ impl Report<'_> {
             text = format!("{text} -> {}", self.ctx.display(&self.records[to].path));
         }
         let o = &r.ops;
-        let note = if c.atomic {
-            "(atomic)"
+        let mut notes: Vec<String> = Vec::new();
+        if c.atomic {
+            notes.push("atomic".into());
         } else if c.bucket == Bucket::Write && o.attr > 0 && o.write + o.create + o.moved_in == 0 {
-            "(attrs)"
+            notes.push("attrs".into());
         } else if c.hidden == Some(Hidden::Probe) {
-            "(lookup)"
-        } else {
-            ""
-        };
+            notes.push("lookup".into());
+        }
+        if self.verbose {
+            if c.bucket == Bucket::Write && o.read > 0 {
+                notes.push("rw".into());
+            }
+            let mut by: Vec<&str> = Vec::new();
+            for pid in &r.pids {
+                if let Some(n) = self.names.get(pid)
+                    && !by.contains(&n.as_str())
+                {
+                    by.push(n);
+                }
+            }
+            if !by.is_empty() {
+                notes.push(by.join(", "));
+            }
+            if !c.lookups_before.is_empty() {
+                let tried: Vec<String> = c
+                    .lookups_before
+                    .iter()
+                    .map(|&j| self.ctx.display(&self.records[j].path))
+                    .collect();
+                notes.push(format!("tried {} first", tried.join(", ")));
+            }
+        }
         Line {
             text,
-            note: note.into(),
+            note: if notes.is_empty() {
+                String::new()
+            } else {
+                format!("({})", notes.join("; "))
+            },
         }
     }
 
@@ -282,7 +333,7 @@ impl Report<'_> {
         }
 
         writeln!(w)?;
-        writeln!(w, "Summary")?;
+        writeln!(w, "{}", self.bold("Summary"))?;
         writeln!(w, "  {}", parts.join(", "))?;
         if !self.all && !hidden.is_empty() {
             let parts: Vec<String> = ["system/toolchain", "virtual", "lookup probes", "temp files"]
@@ -295,7 +346,8 @@ impl Report<'_> {
     }
 }
 
-fn write_lines(w: &mut dyn Write, lines: &[Line], limit: bool) -> io::Result<()> {
+fn write_lines(w: &mut dyn Write, lines: &[Line], limit: bool, color: &str) -> io::Result<()> {
+    let reset = if color.is_empty() { "" } else { RESET };
     let shown = if limit && lines.len() > MAX_LINES {
         &lines[..MAX_LINES]
     } else {
@@ -310,9 +362,10 @@ fn write_lines(w: &mut dyn Write, lines: &[Line], limit: bool) -> io::Result<()>
         .min(MAX_NOTE_COLUMN);
     for l in shown {
         if l.note.is_empty() {
-            writeln!(w, "  {}", l.text)?;
+            writeln!(w, "  {color}{}{reset}", l.text)?;
         } else {
-            writeln!(w, "  {:<width$}  {}", l.text, l.note)?;
+            let pad = width.saturating_sub(l.text.chars().count());
+            writeln!(w, "  {color}{}{reset}{:pad$}  {}", l.text, "", l.note)?;
         }
     }
     if shown.len() < lines.len() {
