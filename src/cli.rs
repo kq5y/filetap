@@ -11,6 +11,10 @@ use clap::Parser;
   filetap -- make"
 )]
 pub struct Args {
+    /// Keep tracing until background processes started by the command exit
+    #[arg(long)]
+    pub wait: bool,
+
     #[arg(last = true, required = true, value_name = "COMMAND")]
     pub command: Vec<OsString>,
 }

@@ -5,7 +5,7 @@ mod launch;
 use std::ffi::OsString;
 use std::io::{self, Write};
 use std::process::exit;
-use std::sync::atomic::{AtomicI32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::time::{Duration, Instant};
 
 use clap::Parser;
@@ -39,6 +39,17 @@ fn main() {
         // SAFETY: SIG_IGN is a valid disposition.
         unsafe { libc::signal(sig, libc::SIG_IGN) };
     }
+    if args.wait && !saved.is_ignored(libc::SIGINT) {
+        // No SA_RESTART: the blocking read has to return so we can stop
+        // waiting for background processes.
+        let act = SigAction::new(
+            SigHandler::Handler(interrupted),
+            SaFlags::empty(),
+            SigSet::empty(),
+        );
+        // SAFETY: interrupted only stores to an atomic.
+        let _ = unsafe { sigaction(Signal::SIGINT, &act) };
+    }
     // Unlike Ctrl-C, these are usually sent to filetap alone (kill, a CI
     // runner's timeout, a closed ssh session), so pass them on.
     for sig in [Signal::SIGTERM, Signal::SIGHUP] {
@@ -63,7 +74,7 @@ fn main() {
     };
     let started = Instant::now();
 
-    let (exit_status, procs, running) = loop {
+    let (exit_status, mut procs, mut running) = loop {
         match Msg::read(&mut rx) {
             Ok(Some(Msg::Started { pid })) => {
                 ROOT.store(pid, Ordering::SeqCst);
@@ -99,20 +110,57 @@ fn main() {
         }
     };
 
+    let elapsed = started.elapsed();
+
+    let mut gave_up = false;
+    if args.wait && !running.is_empty() {
+        // Only a Ctrl-C after the command itself is done means "stop waiting".
+        INTERRUPTED.store(false, Ordering::SeqCst);
+        loop {
+            match Msg::read(&mut rx) {
+                Ok(Some(Msg::Done { procs: n })) => {
+                    procs = n;
+                    running.clear();
+                    break;
+                }
+                Ok(Some(_)) => {}
+                Err(e)
+                    if e.kind() == io::ErrorKind::Interrupted
+                        && !INTERRUPTED.load(Ordering::SeqCst) => {}
+                Ok(None) | Err(_) => {
+                    running.clear();
+                    gave_up = true;
+                    break;
+                }
+            }
+        }
+    }
+
     let mut out = io::stderr().lock();
     let _ = header(
         &mut out,
         &args.command,
         exit_status,
-        started.elapsed(),
+        elapsed,
         procs,
         &running,
     );
+    if gave_up {
+        let _ = writeln!(
+            out,
+            "filetap: stopped waiting for background processes; their later file access is not in this report"
+        );
+    }
     exit(exit_status.code());
 }
 
 static ROOT: AtomicI32 = AtomicI32::new(0);
 static PENDING: AtomicI32 = AtomicI32::new(0);
+static INTERRUPTED: AtomicBool = AtomicBool::new(false);
+
+extern "C" fn interrupted(_: libc::c_int) {
+    INTERRUPTED.store(true, Ordering::SeqCst);
+}
 
 extern "C" fn forward(sig: libc::c_int) {
     match ROOT.load(Ordering::SeqCst) {
