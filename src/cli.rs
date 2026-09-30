@@ -50,6 +50,10 @@ pub struct Args {
     #[arg(long, value_name = "WHEN", default_value = "auto")]
     pub color: Color,
 
+    /// Order within each section: when first touched, or by path
+    #[arg(long, value_name = "ORDER", default_value = "time")]
+    pub sort: Sort,
+
     /// Write the report as JSON, hidden entries included
     #[arg(long)]
     pub json: bool,
@@ -77,6 +81,12 @@ pub struct Args {
 
     #[arg(last = true, required = true, value_name = "COMMAND")]
     pub command: Vec<OsString>,
+}
+
+#[derive(ValueEnum, Clone, Copy, Debug, PartialEq)]
+pub enum Sort {
+    Time,
+    Path,
 }
 
 #[derive(ValueEnum, Clone, Copy, Debug, PartialEq)]

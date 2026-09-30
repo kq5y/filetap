@@ -268,6 +268,7 @@ fn main() {
         ctx: &ctx,
         all: args.all,
         verbose: args.verbose,
+        by_path: args.sort == cli::Sort::Path,
         names,
         color: use_color(args.color, args.output.as_deref()),
     };

@@ -49,6 +49,8 @@ pub struct Report<'a> {
     /// pid -> the program it last exec'd, for -v.
     pub names: HashMap<i32, String>,
     pub color: bool,
+    /// --sort path: by path instead of in the order things happened.
+    pub by_path: bool,
 }
 
 const BOLD: &str = "\x1b[1m";
@@ -65,9 +67,13 @@ impl Report<'_> {
             if entries.is_empty() {
                 continue;
             }
-            entries.sort_by_key(|&i| {
-                let r = &self.records[i];
-                (self.ctx.rank(&r.path), r.first_seen)
+            entries.sort_by(|&a, &b| {
+                let (a, b) = (&self.records[a], &self.records[b]);
+                let key = |r: &Record| {
+                    let order = if self.by_path { 0 } else { r.first_seen };
+                    (self.ctx.rank(&r.path), order)
+                };
+                key(a).cmp(&key(b)).then_with(|| a.path.cmp(&b.path))
             });
             let lines = if self.all || matches!(bucket, Bucket::Exec | Bucket::Rename) {
                 entries.iter().map(|&i| self.line(i)).collect()
@@ -127,6 +133,22 @@ impl Report<'_> {
         if self.verbose {
             if c.bucket == Bucket::Write && o.read > 0 {
                 notes.push("rw".into());
+            }
+            let times = o.read
+                + o.list
+                + o.write
+                + o.create
+                + o.delete
+                + o.exec
+                + o.stat
+                + o.attr
+                + o.moved_in
+                + o.moved_out
+                + r.errors.missing
+                + r.errors.denied
+                + r.errors.other;
+            if times > 1 {
+                notes.push(format!("{times}x"));
             }
             let mut by: Vec<&str> = Vec::new();
             for pid in &r.pids {

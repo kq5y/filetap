@@ -70,7 +70,8 @@ filetap [OPTIONS] -- <COMMAND> [ARGS...]
 | `--hide GLOB` | Leave out matching paths |
 | `--show GLOB` | Always list matching paths, unfolded |
 | `-a`, `--all` | Nothing hidden, nothing folded |
-| `-v`, `--verbose` | Which programs touched each path, and what they tried first |
+| `-v`, `--verbose` | How often each path was touched, by which programs, and what they tried first |
+| `--sort path` | Sort by path instead of by when each path was first touched |
 | `--json` | Everything, including what's hidden and why |
 | `-o FILE` | Write the report to FILE (default stderr, `-` for stdout) |
 | `--wait` | Also wait for processes the command left running |
