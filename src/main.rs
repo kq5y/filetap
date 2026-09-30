@@ -1,4 +1,5 @@
 mod cli;
+mod launch;
 
 use std::process::exit;
 
@@ -11,5 +12,14 @@ fn main() {
         let _ = e.print();
         exit(if e.use_stderr() { 125 } else { 0 });
     });
-    eprintln!("{:?}", args.command);
+
+    let path_var = std::env::var_os("PATH");
+    let prog = match launch::resolve(&args.command[0], path_var.as_deref()) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("filetap: {e}");
+            exit(e.exit_code());
+        }
+    };
+    eprintln!("{}", prog.display());
 }
