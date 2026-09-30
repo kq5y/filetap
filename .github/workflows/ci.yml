@@ -1,6 +1,7 @@
 name: CI
 
 on:
+  workflow_dispatch:
   push:
     branches: [main]
   pull_request:
@@ -10,6 +11,16 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
+      # strace is only a reference for the scenario tests.
+      - run: sudo apt-get update && sudo apt-get install -y strace
       - run: cargo fmt --check
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test
+
+  # No aarch64 runner yet; at least make sure it builds.
+  check-aarch64:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - run: rustup target add aarch64-unknown-linux-gnu
+      - run: cargo clippy --target aarch64-unknown-linux-gnu -- -D warnings
