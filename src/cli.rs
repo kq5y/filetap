@@ -12,6 +12,10 @@ use clap::Parser;
   filetap -o report.txt -- make"
 )]
 pub struct Args {
+    /// Show everything: no folding, nothing hidden
+    #[arg(short, long)]
+    pub all: bool,
+
     /// Write the report to FILE instead of stderr ("-" for stdout)
     #[arg(short, long, value_name = "FILE")]
     pub output: Option<PathBuf>,

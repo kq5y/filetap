@@ -28,7 +28,7 @@ fn tempdir(name: &str) -> PathBuf {
 fn exit_code_is_passed_through() {
     let out = run(&["--", "sh", "-c", "exit 7"]);
     assert_eq!(out.status.code(), Some(7));
-    assert!(stderr(&out).contains("filetap: sh -c exit 7 exited 7 after"));
+    assert!(stderr(&out).contains("filetap: sh -c 'exit 7' exited 7 after"));
 }
 
 // The root's first stop after PTRACE_SEIZE must be resumed with PTRACE_CONT;
@@ -160,4 +160,31 @@ fn sigterm_is_forwarded_to_the_command() {
     unsafe { libc::kill(child.id() as i32, libc::SIGTERM) };
     let out = child.wait_with_output().unwrap();
     assert_eq!(out.status.code(), Some(9));
+}
+
+#[test]
+fn report_puts_changes_in_the_right_buckets() {
+    let dir = tempdir("report");
+    fs::create_dir(dir.join(".git")).unwrap();
+    fs::write(dir.join("old.txt"), "x").unwrap();
+    fs::write(dir.join("gone.txt"), "x").unwrap();
+    let out = filetap()
+        .args([
+            "--",
+            "sh",
+            "-c",
+            "echo y > old.txt; echo z > new.txt; rm gone.txt; cat .env.local 2>/dev/null; exit 0",
+        ])
+        .current_dir(&dir)
+        .output()
+        .unwrap();
+    let report = stderr(&out);
+    for want in [
+        "MISSING\n  ./.env.local\n",
+        "CREATE\n  ./new.txt\n",
+        "WRITE\n  ./old.txt\n",
+        "DELETE\n  ./gone.txt\n",
+    ] {
+        assert!(report.contains(want), "no {want:?} in:\n{report}");
+    }
 }

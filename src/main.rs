@@ -1,7 +1,11 @@
+mod aggregate;
 mod backend;
+mod classify;
 mod cli;
 mod dump;
 mod launch;
+mod text;
+mod zone;
 
 use std::ffi::OsString;
 use std::fs::File;
@@ -15,8 +19,9 @@ use clap::Parser;
 use nix::errno::Errno;
 use nix::sys::signal::{SaFlags, SigAction, SigHandler, SigSet, Signal, sigaction};
 
-use backend::Exit;
+use aggregate::Aggregator;
 use backend::ptrace::{self, Msg, SavedSignals};
+use backend::{Exit, SysEvent};
 
 fn main() {
     // Usage errors exit with 125 like env(1) and timeout(1), so they can't be
@@ -68,12 +73,16 @@ fn main() {
         let _ = unsafe { sigaction(sig, &act) };
     }
 
-    let mut dump = args.dump_events.as_deref().map(|p| {
+    let dump = args.dump_events.as_deref().map(|p| {
         File::create(p).map(io::BufWriter::new).unwrap_or_else(|e| {
             eprintln!("filetap: {}: {}", p.display(), ioerr(&e));
             exit(125);
         })
     });
+    let mut sink = Sink {
+        dump,
+        agg: Aggregator::default(),
+    };
 
     let mut rx = match ptrace::start(&prog, &args.command, &saved) {
         Ok(t) => t,
@@ -86,11 +95,7 @@ fn main() {
 
     let (exit_status, mut procs, mut running) = loop {
         match Msg::read(&mut rx) {
-            Ok(Some(Msg::Event(ev))) => {
-                if let Some(d) = &mut dump {
-                    let _ = dump::write_event(d, &ev);
-                }
-            }
+            Ok(Some(Msg::Event(ev))) => sink.event(&ev),
             Ok(Some(Msg::Started { pid })) => {
                 ROOT.store(pid, Ordering::SeqCst);
                 let sig = PENDING.swap(0, Ordering::SeqCst);
@@ -138,11 +143,7 @@ fn main() {
                     running.clear();
                     break;
                 }
-                Ok(Some(Msg::Event(ev))) => {
-                    if let Some(d) = &mut dump {
-                        let _ = dump::write_event(d, &ev);
-                    }
-                }
+                Ok(Some(Msg::Event(ev))) => sink.event(&ev),
                 Ok(Some(_)) => {}
                 Err(e)
                     if e.kind() == io::ErrorKind::Interrupted
@@ -156,9 +157,20 @@ fn main() {
         }
     }
 
-    if let Some(d) = &mut dump {
+    if let Some(d) = &mut sink.dump {
         let _ = d.flush();
     }
+
+    let mut ctx = zone::Context::from_env(None);
+    let mut records = sink.agg.records;
+    aggregate::enrich(&mut records);
+    for r in &records {
+        if r.ops.exec > 0 {
+            ctx.exec_seen(&r.path);
+        }
+    }
+    let classes = classify::classify(&records, &ctx);
+
     let (mut out, shared) = report_writer(args.output.as_deref());
     if shared {
         // Separates the report from whatever the command printed last.
@@ -178,6 +190,21 @@ fn main() {
             "filetap: stopped waiting for background processes; their later file access is not in this report"
         );
     }
+    // libuv sets up io_uring in every node process just to batch epoll
+    // calls, so saying this by default would mostly be a false alarm.
+    if sink.agg.io_uring && args.all {
+        let _ = writeln!(
+            out,
+            "filetap: the command set up io_uring; file access through it is not in this report"
+        );
+    }
+    let report = text::Report {
+        records: &records,
+        classes: &classes,
+        ctx: &ctx,
+        all: args.all,
+    };
+    let _ = report.write(&mut out);
     let _ = out.flush();
     exit(exit_status.code());
 }
@@ -200,6 +227,20 @@ fn report_writer(path: Option<&Path>) -> (Box<dyn Write>, bool) {
                 (Box::new(io::stderr()), true)
             }
         },
+    }
+}
+
+struct Sink {
+    dump: Option<io::BufWriter<File>>,
+    agg: Aggregator,
+}
+
+impl Sink {
+    fn event(&mut self, ev: &SysEvent) {
+        if let Some(d) = &mut self.dump {
+            let _ = dump::write_event(d, ev);
+        }
+        self.agg.add(ev);
     }
 }
 
@@ -229,11 +270,7 @@ fn header(
     procs: u32,
     running: &[(i32, String)],
 ) -> io::Result<()> {
-    let cmd = command
-        .iter()
-        .map(|a| a.to_string_lossy())
-        .collect::<Vec<_>>()
-        .join(" ");
+    let cmd = command_line(command);
     let how = match exit {
         Exit::Code(c) => format!("exited {c}"),
         Exit::Signal(s) => format!("was killed by {}", signame(s)),
@@ -260,6 +297,32 @@ fn header(
         )?;
     }
     Ok(())
+}
+
+/// The command as a shell would take it back, cut short if it's long: a
+/// `sh -c` script shouldn't take over the header.
+fn command_line(command: &[OsString]) -> String {
+    const MAX: usize = 60;
+    let quoted: Vec<String> = command
+        .iter()
+        .map(|a| {
+            let a = a.to_string_lossy();
+            let plain = !a.is_empty()
+                && a.chars()
+                    .all(|c| c.is_ascii_alphanumeric() || "-_./=:,+@%".contains(c));
+            if plain {
+                a.into_owned()
+            } else {
+                format!("'{}'", a.replace('\'', "'\\''"))
+            }
+        })
+        .collect();
+    let line: String = quoted.join(" ").replace('\n', "\\n").replace('\t', " ");
+    if line.chars().count() <= MAX {
+        return line;
+    }
+    let cut: String = line.chars().take(MAX - 3).collect();
+    format!("{}...", cut.trim_end())
 }
 
 fn signame(sig: i32) -> String {
