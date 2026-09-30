@@ -11,8 +11,8 @@ use nix::sys::ptrace::{self, Options};
 use nix::sys::signal::{Signal, kill, raise};
 use nix::unistd::{ForkResult, Pid, execv, fork, pipe2};
 
-use super::{Msg, SavedSignals};
-use crate::backend::Exit;
+use super::{Msg, SavedSignals, decode, seccomp};
+use crate::backend::{Call, Exit, SysEvent};
 
 pub fn run(prog: &CStr, argv: &[CString], saved: &SavedSignals, tx: File) -> ! {
     // The tracer must survive anything aimed at the command's process group:
@@ -53,6 +53,13 @@ fn launch(prog: &CStr, argv: &[CString], saved: &SavedSignals) -> Result<(i32, F
         ForkResult::Child => {
             drop(err_r);
             saved.restore();
+            if let Err(e) = seccomp::install() {
+                // Negative to tell it apart from an execve errno.
+                let errno = -e.raw_os_error().unwrap_or(libc::EINVAL);
+                let _ = nix::unistd::write(&err_w, &errno.to_ne_bytes());
+                // SAFETY: _exit is always safe.
+                unsafe { libc::_exit(127) }
+            }
             let _ = raise(Signal::SIGSTOP);
             let e = execv(prog, argv).unwrap_err();
             let _ = nix::unistd::write(&err_w, &(e as i32).to_ne_bytes());
@@ -65,6 +72,11 @@ fn launch(prog: &CStr, argv: &[CString], saved: &SavedSignals) -> Result<(i32, F
 
     let (_, status) = wait(child.as_raw(), libc::WUNTRACED).map_err(|e| format!("waitpid: {e}"))?;
     if !libc::WIFSTOPPED(status) {
+        let mut buf = [0u8; 4];
+        if (&File::from(err_r)).read_exact(&mut buf).is_ok() {
+            let errno = Errno::from_raw(-i32::from_ne_bytes(buf));
+            return Err(format!("seccomp: {}", errno.desc()));
+        }
         return Err("command exited before it could be traced".into());
     }
 
@@ -72,6 +84,8 @@ fn launch(prog: &CStr, argv: &[CString], saved: &SavedSignals) -> Result<(i32, F
         | Options::PTRACE_O_TRACEVFORK
         | Options::PTRACE_O_TRACECLONE
         | Options::PTRACE_O_TRACEEXEC
+        | Options::PTRACE_O_TRACESECCOMP
+        | Options::PTRACE_O_TRACESYSGOOD
         | Options::PTRACE_O_EXITKILL;
     if let Err(e) = ptrace::seize(child, opts) {
         let _ = kill(child, Signal::SIGKILL);
@@ -114,6 +128,8 @@ struct State {
     exec_err: File,
     /// tid -> tgid for every live tracee.
     live: HashMap<i32, i32>,
+    /// Decoded at the seccomp stop, waiting for the syscall-exit-stop.
+    pending: HashMap<i32, Call>,
     procs: u32,
 }
 
@@ -127,6 +143,7 @@ impl State {
             root_done: false,
             exec_err,
             live: HashMap::from([(root, root)]),
+            pending: HashMap::new(),
             procs: 1,
         }
     }
@@ -156,6 +173,7 @@ impl State {
     fn handle(&mut self, (pid, status): (i32, i32)) {
         if libc::WIFEXITED(status) || libc::WIFSIGNALED(status) {
             self.live.remove(&pid);
+            self.pending.remove(&pid);
             if pid == self.root {
                 let exit = if libc::WIFEXITED(status) {
                     Exit::Code(libc::WEXITSTATUS(status))
@@ -172,8 +190,16 @@ impl State {
         self.seen(pid);
 
         let sig = libc::WSTOPSIG(status);
+        if sig == libc::SIGTRAP | 0x80 {
+            self.syscall_exit(pid);
+            return;
+        }
         let inject = match status >> 16 {
             0 => sig,
+            libc::PTRACE_EVENT_SECCOMP => {
+                self.syscall_entry(pid);
+                return;
+            }
             libc::PTRACE_EVENT_STOP => {
                 // The root was already stopped (by its own SIGSTOP) when we
                 // seized it, so its first stop looks like a group-stop.
@@ -212,10 +238,16 @@ impl State {
             libc::PTRACE_EVENT_EXEC => {
                 // A non-leader thread that execs takes over the leader's tid;
                 // the old tid never reports an exit.
-                if let Ok(old) = ptrace::getevent(Pid::from_raw(pid))
-                    && old as i32 != pid
-                {
-                    self.live.remove(&(old as i32));
+                let old = ptrace::getevent(Pid::from_raw(pid)).map_or(pid, |t| t as i32);
+                if old != pid {
+                    self.live.remove(&old);
+                    self.pending.remove(&pid);
+                }
+                // Report the exec here: the syscall-exit-stop that follows
+                // only comes with PTRACE_SYSCALL, and argv is gone by now
+                // anyway.
+                if let Some(call) = self.pending.remove(&old) {
+                    self.emit(pid, call, Ok(0));
                 }
                 if pid == self.root {
                     self.root_execed = true;
@@ -225,6 +257,51 @@ impl State {
             _ => 0,
         };
         cont(pid, inject);
+    }
+
+    fn syscall_entry(&mut self, pid: i32) {
+        // Nobody is listening once the front has printed its report; just
+        // let the leftovers run.
+        if self.tx.is_some()
+            && let Some(info) = syscall_info(pid)
+            && info.op == PTRACE_SYSCALL_INFO_SECCOMP
+        {
+            let d = info.data;
+            let args = [d[1], d[2], d[3], d[4], d[5], d[6]];
+            if let Some(call) = decode::decode(pid, d[0] as i64, args) {
+                self.pending.insert(pid, call);
+                // Since Linux 4.8 the seccomp stop comes after syscall entry,
+                // so PTRACE_SYSCALL from here stops next at syscall exit.
+                ptrace_resume(libc::PTRACE_SYSCALL, pid, 0);
+                return;
+            }
+        }
+        cont(pid, 0);
+    }
+
+    fn syscall_exit(&mut self, pid: i32) {
+        if let Some(call) = self.pending.remove(&pid)
+            && let Some(info) = syscall_info(pid)
+            && info.op == PTRACE_SYSCALL_INFO_EXIT
+        {
+            let rval = info.data[0] as i64;
+            let result = if info.data[1] as u8 != 0 {
+                Err(-rval as i32)
+            } else {
+                Ok(rval)
+            };
+            // ERESTARTSYS and friends: the syscall runs again and we'll see
+            // another seccomp stop for it.
+            if !matches!(result, Err(512..=516)) {
+                self.emit(pid, call, result);
+            }
+        }
+        cont(pid, 0);
+    }
+
+    fn emit(&mut self, tid: i32, call: Call, result: Result<i64, i32>) {
+        let pid = self.live.get(&tid).copied().unwrap_or(tid);
+        self.send(&Msg::Event(SysEvent { pid, call, result }));
     }
 
     /// Registers a tracee the first time any stop or event mentions it. A new
@@ -288,17 +365,59 @@ fn wait(pid: i32, flags: i32) -> Result<(i32, i32), Errno> {
 }
 
 fn cont(pid: i32, sig: i32) {
+    ptrace_resume(libc::PTRACE_CONT, pid, sig);
+}
+
+fn ptrace_resume(req: libc::c_uint, pid: i32, sig: i32) {
     // ESRCH means the tracee was killed while stopped; its exit will show up
     // in the next wait.
     // SAFETY: plain ptrace request; data carries the signal to inject.
     unsafe {
         libc::ptrace(
-            libc::PTRACE_CONT,
+            req,
             pid,
             ptr::null_mut::<libc::c_void>(),
             sig as libc::c_long,
         )
     };
+}
+
+// struct ptrace_syscall_info from <linux/ptrace.h>. libc only has it for
+// glibc targets, and we build for musl too.
+#[repr(C)]
+struct SyscallInfo {
+    op: u8,
+    _pad: [u8; 3],
+    _arch: u32,
+    _ip: u64,
+    _sp: u64,
+    /// entry/seccomp: nr, args[6], ret_data. exit: rval, is_error.
+    data: [u64; 8],
+}
+
+const PTRACE_GET_SYSCALL_INFO: libc::c_uint = 0x420e;
+const PTRACE_SYSCALL_INFO_EXIT: u8 = 2;
+const PTRACE_SYSCALL_INFO_SECCOMP: u8 = 3;
+
+fn syscall_info(pid: i32) -> Option<SyscallInfo> {
+    let mut info = SyscallInfo {
+        op: 0,
+        _pad: [0; 3],
+        _arch: 0,
+        _ip: 0,
+        _sp: 0,
+        data: [0; 8],
+    };
+    // SAFETY: the kernel writes at most size_of::<SyscallInfo>() bytes.
+    let r = unsafe {
+        libc::ptrace(
+            PTRACE_GET_SYSCALL_INFO,
+            pid,
+            std::mem::size_of::<SyscallInfo>(),
+            &mut info as *mut SyscallInfo,
+        )
+    };
+    (r > 0).then_some(info)
 }
 
 fn read_tgid(tid: i32) -> Option<i32> {

@@ -2,7 +2,7 @@
 
 use std::io::{self, Read};
 
-use crate::backend::Exit;
+use crate::backend::{Call, Exit, PathArg, SysEvent};
 
 #[derive(Debug, PartialEq)]
 pub enum Msg {
@@ -24,6 +24,7 @@ pub enum Msg {
     Done {
         procs: u32,
     },
+    Event(SysEvent),
 }
 
 impl Msg {
@@ -69,6 +70,10 @@ impl Msg {
                 b.push(5);
                 put_u32(&mut b, *procs);
             }
+            Msg::Event(ev) => {
+                b.push(6);
+                put_event(&mut b, ev);
+            }
         }
         b
     }
@@ -104,6 +109,7 @@ impl Msg {
                 }
             }
             5 => Msg::Done { procs: get_u32(r)? },
+            6 => Msg::Event(get_event(r)?),
             t => {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
@@ -113,6 +119,184 @@ impl Msg {
         };
         Ok(Some(msg))
     }
+}
+
+fn put_event(b: &mut Vec<u8>, ev: &SysEvent) {
+    put_i32(b, ev.pid);
+    match ev.result {
+        Ok(v) => {
+            b.push(0);
+            b.extend_from_slice(&v.to_ne_bytes());
+        }
+        Err(e) => {
+            b.push(1);
+            put_i32(b, e);
+        }
+    }
+    match &ev.call {
+        Call::Open {
+            path,
+            flags,
+            existed,
+        } => {
+            b.push(1);
+            put_path(b, path);
+            put_i32(b, *flags);
+            put_tri(b, *existed);
+        }
+        Call::Stat { path } => {
+            b.push(2);
+            put_path(b, path);
+        }
+        Call::Exec { path, argv } => {
+            b.push(3);
+            put_path(b, path);
+            put_u32(b, argv.len() as u32);
+            for a in argv {
+                put_bytes(b, a);
+            }
+        }
+        Call::Rename {
+            from,
+            to,
+            flags,
+            to_existed,
+        } => {
+            b.push(4);
+            put_path(b, from);
+            put_path(b, to);
+            put_u32(b, *flags);
+            put_tri(b, *to_existed);
+        }
+        Call::Unlink { path, dir } => {
+            b.push(5);
+            put_path(b, path);
+            b.push(*dir as u8);
+        }
+        Call::Mkdir { path } => {
+            b.push(6);
+            put_path(b, path);
+        }
+        Call::Link { from, to, symbolic } => {
+            b.push(7);
+            put_path(b, from);
+            put_path(b, to);
+            b.push(*symbolic as u8);
+        }
+        Call::Truncate { path } => {
+            b.push(8);
+            put_path(b, path);
+        }
+        Call::Attr { path } => {
+            b.push(9);
+            put_path(b, path);
+        }
+        Call::IoUringSetup => b.push(10),
+    }
+}
+
+fn get_event(r: &mut impl Read) -> io::Result<SysEvent> {
+    let pid = get_i32(r)?;
+    let result = match get_u8(r)? {
+        0 => {
+            let mut v = [0u8; 8];
+            r.read_exact(&mut v)?;
+            Ok(i64::from_ne_bytes(v))
+        }
+        _ => Err(get_i32(r)?),
+    };
+    let call = match get_u8(r)? {
+        1 => Call::Open {
+            path: get_path(r)?,
+            flags: get_i32(r)?,
+            existed: get_tri(r)?,
+        },
+        2 => Call::Stat { path: get_path(r)? },
+        3 => {
+            let path = get_path(r)?;
+            let n = get_u32(r)?;
+            let mut argv = Vec::with_capacity(n as usize);
+            for _ in 0..n {
+                argv.push(get_bytes(r)?);
+            }
+            Call::Exec { path, argv }
+        }
+        4 => Call::Rename {
+            from: get_path(r)?,
+            to: get_path(r)?,
+            flags: get_u32(r)?,
+            to_existed: get_tri(r)?,
+        },
+        5 => Call::Unlink {
+            path: get_path(r)?,
+            dir: get_u8(r)? != 0,
+        },
+        6 => Call::Mkdir { path: get_path(r)? },
+        7 => Call::Link {
+            from: get_path(r)?,
+            to: get_path(r)?,
+            symbolic: get_u8(r)? != 0,
+        },
+        8 => Call::Truncate { path: get_path(r)? },
+        9 => Call::Attr { path: get_path(r)? },
+        10 => Call::IoUringSetup,
+        t => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("unknown call tag {t}"),
+            ));
+        }
+    };
+    Ok(SysEvent { pid, call, result })
+}
+
+fn put_path(b: &mut Vec<u8>, p: &PathArg) {
+    match &p.dir {
+        Some(d) => {
+            b.push(1);
+            put_bytes(b, d);
+        }
+        None => b.push(0),
+    }
+    put_bytes(b, &p.raw);
+}
+
+fn get_path(r: &mut impl Read) -> io::Result<PathArg> {
+    let dir = match get_u8(r)? {
+        0 => None,
+        _ => Some(get_bytes(r)?),
+    };
+    Ok(PathArg {
+        dir,
+        raw: get_bytes(r)?,
+    })
+}
+
+fn put_tri(b: &mut Vec<u8>, v: Option<bool>) {
+    b.push(match v {
+        None => 0,
+        Some(false) => 1,
+        Some(true) => 2,
+    });
+}
+
+fn get_tri(r: &mut impl Read) -> io::Result<Option<bool>> {
+    Ok(match get_u8(r)? {
+        0 => None,
+        1 => Some(false),
+        _ => Some(true),
+    })
+}
+
+fn put_bytes(b: &mut Vec<u8>, v: &[u8]) {
+    put_u32(b, v.len() as u32);
+    b.extend_from_slice(v);
+}
+
+fn get_bytes(r: &mut impl Read) -> io::Result<Vec<u8>> {
+    let mut v = vec![0u8; get_u32(r)? as usize];
+    r.read_exact(&mut v)?;
+    Ok(v)
 }
 
 fn put_i32(b: &mut Vec<u8>, v: i32) {
@@ -168,6 +352,33 @@ mod tests {
                 running: vec![(1234, "esbuild".into()), (1301, "node".into())],
             },
             Msg::Done { procs: 9 },
+            Msg::Event(SysEvent {
+                pid: 7,
+                call: Call::Rename {
+                    from: PathArg {
+                        dir: Some(b"/tmp".to_vec()),
+                        raw: b"a\xff".to_vec(),
+                    },
+                    to: PathArg {
+                        dir: None,
+                        raw: b"/tmp/b".to_vec(),
+                    },
+                    flags: 0,
+                    to_existed: Some(true),
+                },
+                result: Err(2),
+            }),
+            Msg::Event(SysEvent {
+                pid: 8,
+                call: Call::Exec {
+                    path: PathArg {
+                        dir: None,
+                        raw: b"/bin/sh".to_vec(),
+                    },
+                    argv: vec![b"sh".to_vec(), b"-c".to_vec()],
+                },
+                result: Ok(0),
+            }),
         ];
         let buf: Vec<u8> = msgs.iter().flat_map(|m| m.encode()).collect();
         let mut r = &buf[..];

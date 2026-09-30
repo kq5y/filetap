@@ -6,7 +6,9 @@
 //! returns to the shell, while the tracer keeps servicing any daemonized
 //! descendants until they are gone.
 
+mod decode;
 mod msg;
+mod seccomp;
 mod tracer;
 
 use std::ffi::{CString, OsString};

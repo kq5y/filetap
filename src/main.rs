@@ -78,6 +78,8 @@ fn main() {
 
     let (exit_status, mut procs, mut running) = loop {
         match Msg::read(&mut rx) {
+            // Nothing looks at file access yet.
+            Ok(Some(Msg::Event(_))) => {}
             Ok(Some(Msg::Started { pid })) => {
                 ROOT.store(pid, Ordering::SeqCst);
                 let sig = PENDING.swap(0, Ordering::SeqCst);
