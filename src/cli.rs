@@ -20,6 +20,10 @@ pub struct Args {
     #[arg(long)]
     pub wait: bool,
 
+    /// Save the raw syscall events as JSON lines to FILE (for bug reports)
+    #[arg(long, value_name = "FILE")]
+    pub dump_events: Option<PathBuf>,
+
     #[arg(last = true, required = true, value_name = "COMMAND")]
     pub command: Vec<OsString>,
 }

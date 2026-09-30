@@ -1,5 +1,6 @@
 mod backend;
 mod cli;
+mod dump;
 mod launch;
 
 use std::ffi::OsString;
@@ -67,6 +68,13 @@ fn main() {
         let _ = unsafe { sigaction(sig, &act) };
     }
 
+    let mut dump = args.dump_events.as_deref().map(|p| {
+        File::create(p).map(io::BufWriter::new).unwrap_or_else(|e| {
+            eprintln!("filetap: {}: {}", p.display(), ioerr(&e));
+            exit(125);
+        })
+    });
+
     let mut rx = match ptrace::start(&prog, &args.command, &saved) {
         Ok(t) => t,
         Err(e) => {
@@ -78,8 +86,11 @@ fn main() {
 
     let (exit_status, mut procs, mut running) = loop {
         match Msg::read(&mut rx) {
-            // Nothing looks at file access yet.
-            Ok(Some(Msg::Event(_))) => {}
+            Ok(Some(Msg::Event(ev))) => {
+                if let Some(d) = &mut dump {
+                    let _ = dump::write_event(d, &ev);
+                }
+            }
             Ok(Some(Msg::Started { pid })) => {
                 ROOT.store(pid, Ordering::SeqCst);
                 let sig = PENDING.swap(0, Ordering::SeqCst);
@@ -127,6 +138,11 @@ fn main() {
                     running.clear();
                     break;
                 }
+                Ok(Some(Msg::Event(ev))) => {
+                    if let Some(d) = &mut dump {
+                        let _ = dump::write_event(d, &ev);
+                    }
+                }
                 Ok(Some(_)) => {}
                 Err(e)
                     if e.kind() == io::ErrorKind::Interrupted
@@ -140,6 +156,9 @@ fn main() {
         }
     }
 
+    if let Some(d) = &mut dump {
+        let _ = d.flush();
+    }
     let (mut out, shared) = report_writer(args.output.as_deref());
     if shared {
         // Separates the report from whatever the command printed last.
