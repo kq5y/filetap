@@ -101,7 +101,7 @@ fn main() {
         started: Instant::now(),
     };
 
-    let mut rx = match ptrace::start(&prog, &args.command, &saved) {
+    let mut rx = match ptrace::start(&prog, &args.command, &saved, !args.no_seccomp) {
         Ok(t) => io::BufReader::with_capacity(1 << 16, t),
         Err(e) => {
             eprintln!("filetap: {e:#}");
@@ -215,6 +215,7 @@ fn main() {
             exit: exit_status,
             complete: !gave_up,
             filters: filter.to_json(),
+            seccomp: !args.no_seccomp,
             execs: &sink.agg.execs,
             warnings,
         };

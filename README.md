@@ -75,6 +75,7 @@ filetap [OPTIONS] -- <COMMAND> [ARGS...]
 | `-o FILE` | Write the report to FILE (default stderr, `-` for stdout) |
 | `--wait` | Also wait for processes the command left running |
 | `--root DIR` | Project root (default: git toplevel, else the cwd) |
+| `--no-seccomp` | Stop at every syscall; slower, for systems without seccomp |
 
 Globs starting with `/`, `~/` or `./` are absolute, home-relative or
 root-relative. `*.log` matches a file name anywhere.

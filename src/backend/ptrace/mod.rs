@@ -78,7 +78,7 @@ impl SavedSignals {
 /// Returns the read end of the pipe the tracer reports on.
 ///
 /// Must be called while the process is still single-threaded.
-pub fn start(prog: &Path, argv: &[OsString], saved: &SavedSignals) -> Result<File> {
+pub fn start(prog: &Path, argv: &[OsString], saved: &SavedSignals, seccomp: bool) -> Result<File> {
     let prog = CString::new(prog.as_os_str().as_bytes()).context("command contains a NUL byte")?;
     let argv = argv
         .iter()
@@ -91,7 +91,7 @@ pub fn start(prog: &Path, argv: &[OsString], saved: &SavedSignals) -> Result<Fil
     match unsafe { fork() }.context("fork")? {
         ForkResult::Child => {
             drop(rx);
-            tracer::run(&prog, &argv, saved, File::from(tx))
+            tracer::run(&prog, &argv, saved, File::from(tx), seccomp)
         }
         ForkResult::Parent { .. } => Ok(File::from(rx)),
     }

@@ -166,25 +166,31 @@ fn sigterm_is_forwarded_to_the_command() {
 fn report_puts_changes_in_the_right_buckets() {
     let dir = tempdir("report");
     fs::create_dir(dir.join(".git")).unwrap();
-    fs::write(dir.join("old.txt"), "x").unwrap();
-    fs::write(dir.join("gone.txt"), "x").unwrap();
-    let out = filetap()
-        .args([
-            "--",
-            "sh",
-            "-c",
-            "echo y > old.txt; echo z > new.txt; rm gone.txt; cat .env.local 2>/dev/null; exit 0",
-        ])
-        .current_dir(&dir)
-        .output()
-        .unwrap();
-    let report = stderr(&out);
-    for want in [
-        "MISSING\n  ./.env.local\n",
-        "CREATE\n  ./new.txt\n",
-        "WRITE\n  ./old.txt\n",
-        "DELETE\n  ./gone.txt\n",
-    ] {
-        assert!(report.contains(want), "no {want:?} in:\n{report}");
+    // Same result whether the command stops only on file syscalls or on
+    // every one.
+    for mode in [None, Some("--no-seccomp")] {
+        fs::write(dir.join("old.txt"), "x").unwrap();
+        fs::write(dir.join("gone.txt"), "x").unwrap();
+        let _ = fs::remove_file(dir.join("new.txt"));
+        let out = filetap()
+            .args(mode)
+            .args([
+                "--",
+                "sh",
+                "-c",
+                "echo y > old.txt; echo z > new.txt; rm gone.txt; cat .env.local 2>/dev/null; exit 0",
+            ])
+            .current_dir(&dir)
+            .output()
+            .unwrap();
+        let report = stderr(&out);
+        for want in [
+            "MISSING\n  ./.env.local\n",
+            "CREATE\n  ./new.txt\n",
+            "WRITE\n  ./old.txt\n",
+            "DELETE\n  ./gone.txt\n",
+        ] {
+            assert!(report.contains(want), "{mode:?}: no {want:?} in:\n{report}");
+        }
     }
 }

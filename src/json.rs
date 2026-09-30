@@ -20,6 +20,7 @@ pub struct Run<'a> {
     pub exit: Exit,
     pub complete: bool,
     pub filters: Value,
+    pub seccomp: bool,
     pub execs: &'a [Exec],
     pub warnings: Vec<String>,
 }
@@ -105,7 +106,7 @@ pub fn write(
     let report = json!({
         "schema": "filetap.report/v1",
         "filetap_version": env!("CARGO_PKG_VERSION"),
-        "backend": { "name": "ptrace", "seccomp": true },
+        "backend": { "name": "ptrace", "seccomp": run.seccomp },
         "command": run.command.iter().map(|a| a.to_string_lossy()).collect::<Vec<_>>(),
         "cwd": bytes(&ctx.cwd),
         "root": bytes(&ctx.root),

@@ -66,6 +66,11 @@ pub struct Args {
     #[arg(long)]
     pub wait: bool,
 
+    /// Stop the command at every syscall instead of using a seccomp filter
+    /// (much slower; for systems where seccomp isn't available)
+    #[arg(long)]
+    pub no_seccomp: bool,
+
     /// Save the raw syscall events as JSON lines to FILE (for bug reports)
     #[arg(long, value_name = "FILE")]
     pub dump_events: Option<PathBuf>,

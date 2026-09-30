@@ -16,7 +16,10 @@ use nix::unistd::{ForkResult, Pid, execv, fork, pipe2};
 use super::{Msg, SavedSignals, decode, seccomp};
 use crate::backend::{Call, Exit, SysEvent};
 
-pub fn run(prog: &CStr, argv: &[CString], saved: &SavedSignals, tx: File) -> ! {
+/// With `seccomp` off, the command stops at every syscall instead of only at
+/// the ones we decode: slower, but works where seccomp filters can't be
+/// installed.
+pub fn run(prog: &CStr, argv: &[CString], saved: &SavedSignals, tx: File, seccomp: bool) -> ! {
     // The tracer must survive anything aimed at the command's process group:
     // Ctrl-C, Ctrl-Z, hangups. If it stopped, every tracee would stall in its
     // next ptrace-stop.
@@ -34,8 +37,8 @@ pub fn run(prog: &CStr, argv: &[CString], saved: &SavedSignals, tx: File) -> ! {
         unsafe { libc::signal(sig, libc::SIG_IGN) };
     }
 
-    let mut t = match launch(prog, argv, saved) {
-        Ok((root, exec_err)) => State::new(root, exec_err, tx),
+    let mut t = match launch(prog, argv, saved, seccomp) {
+        Ok((root, exec_err)) => State::new(root, exec_err, tx, seccomp),
         Err(e) => {
             let _ = (&tx).write_all(&Msg::Failed(e).encode());
             process::exit(1);
@@ -49,14 +52,19 @@ pub fn run(prog: &CStr, argv: &[CString], saved: &SavedSignals, tx: File) -> ! {
 }
 
 /// Starts the command stopped, seizes it and lets it run to its execve.
-fn launch(prog: &CStr, argv: &[CString], saved: &SavedSignals) -> Result<(i32, File), String> {
+fn launch(
+    prog: &CStr,
+    argv: &[CString],
+    saved: &SavedSignals,
+    seccomp: bool,
+) -> Result<(i32, File), String> {
     let (err_r, err_w) = pipe2(OFlag::O_CLOEXEC).map_err(|e| format!("pipe: {e}"))?;
     // SAFETY: the tracer is single-threaded.
     let child = match unsafe { fork() }.map_err(|e| format!("fork: {e}"))? {
         ForkResult::Child => {
             drop(err_r);
             saved.restore();
-            if let Err(e) = seccomp::install() {
+            if let Err(e) = seccomp.then(seccomp::install).unwrap_or(Ok(())) {
                 // Negative to tell it apart from an execve errno.
                 let errno = -e.raw_os_error().unwrap_or(libc::EINVAL);
                 let _ = nix::unistd::write(&err_w, &errno.to_ne_bytes());
@@ -83,13 +91,15 @@ fn launch(prog: &CStr, argv: &[CString], saved: &SavedSignals) -> Result<(i32, F
         return Err("command exited before it could be traced".into());
     }
 
-    let opts = Options::PTRACE_O_TRACEFORK
+    let mut opts = Options::PTRACE_O_TRACEFORK
         | Options::PTRACE_O_TRACEVFORK
         | Options::PTRACE_O_TRACECLONE
         | Options::PTRACE_O_TRACEEXEC
-        | Options::PTRACE_O_TRACESECCOMP
         | Options::PTRACE_O_TRACESYSGOOD
         | Options::PTRACE_O_EXITKILL;
+    if seccomp {
+        opts |= Options::PTRACE_O_TRACESECCOMP;
+    }
     if let Err(e) = ptrace::seize(child, opts) {
         let _ = kill(child, Signal::SIGKILL);
         let _ = wait(child.as_raw(), 0);
@@ -124,6 +134,7 @@ fn detach_stdio() {
 
 struct State {
     tx: Option<BufWriter<File>>,
+    seccomp: bool,
     root: i32,
     root_resumed: bool,
     root_execed: bool,
@@ -139,9 +150,10 @@ struct State {
 }
 
 impl State {
-    fn new(root: i32, exec_err: File, tx: File) -> State {
+    fn new(root: i32, exec_err: File, tx: File, seccomp: bool) -> State {
         State {
             tx: Some(BufWriter::with_capacity(1 << 16, tx)),
+            seccomp,
             root,
             root_resumed: false,
             root_execed: false,
@@ -208,13 +220,13 @@ impl State {
 
         let sig = libc::WSTOPSIG(status);
         if sig == libc::SIGTRAP | 0x80 {
-            self.syscall_exit(pid);
+            self.syscall_stop(pid);
             return;
         }
         let inject = match status >> 16 {
             0 => sig,
             libc::PTRACE_EVENT_SECCOMP => {
-                self.syscall_entry(pid);
+                self.syscall_stop(pid);
                 return;
             }
             libc::PTRACE_EVENT_STOP => {
@@ -274,7 +286,34 @@ impl State {
             }
             _ => 0,
         };
-        cont(pid, inject);
+        self.resume(pid, inject);
+    }
+
+    /// Lets a tracee run on. Without the seccomp filter that means to the
+    /// next syscall, for as long as anyone is listening.
+    fn resume(&self, pid: i32, sig: i32) {
+        let req = if !self.seccomp && self.tx.is_some() {
+            libc::PTRACE_SYSCALL
+        } else {
+            libc::PTRACE_CONT
+        };
+        ptrace_resume(req, pid, sig);
+    }
+
+    /// A seccomp stop, or a syscall-entry or -exit stop.
+    fn syscall_stop(&mut self, pid: i32) {
+        match syscall_info(pid) {
+            Some(info)
+                if matches!(
+                    info.op,
+                    PTRACE_SYSCALL_INFO_SECCOMP | PTRACE_SYSCALL_INFO_ENTRY
+                ) =>
+            {
+                self.syscall_entry(pid, &info)
+            }
+            Some(info) if info.op == PTRACE_SYSCALL_INFO_EXIT => self.syscall_exit(pid, &info),
+            _ => self.resume(pid, 0),
+        }
     }
 
     /// Warns about programs that run under filetap but not the way they
@@ -308,13 +347,10 @@ impl State {
         }
     }
 
-    fn syscall_entry(&mut self, pid: i32) {
+    fn syscall_entry(&mut self, pid: i32, info: &SyscallInfo) {
         // Nobody is listening once the front has printed its report; just
         // let the leftovers run.
-        if self.tx.is_some()
-            && let Some(info) = syscall_info(pid)
-            && info.op == PTRACE_SYSCALL_INFO_SECCOMP
-        {
+        if self.tx.is_some() {
             let d = info.data;
             let args = [d[1], d[2], d[3], d[4], d[5], d[6]];
             if let Some(call) = decode::decode(pid, d[0] as i64, args) {
@@ -325,14 +361,11 @@ impl State {
                 return;
             }
         }
-        cont(pid, 0);
+        self.resume(pid, 0);
     }
 
-    fn syscall_exit(&mut self, pid: i32) {
-        if let Some(call) = self.pending.remove(&pid)
-            && let Some(info) = syscall_info(pid)
-            && info.op == PTRACE_SYSCALL_INFO_EXIT
-        {
+    fn syscall_exit(&mut self, pid: i32, info: &SyscallInfo) {
+        if let Some(call) = self.pending.remove(&pid) {
             let rval = info.data[0] as i64;
             let result = if info.data[1] as u8 != 0 {
                 Err(-rval as i32)
@@ -345,7 +378,7 @@ impl State {
                 self.emit(pid, call, result);
             }
         }
-        cont(pid, 0);
+        self.resume(pid, 0);
     }
 
     fn emit(&mut self, tid: i32, call: Call, result: Result<i64, i32>) {
@@ -415,10 +448,6 @@ fn wait(pid: i32, flags: i32) -> Result<(i32, i32), Errno> {
     }
 }
 
-fn cont(pid: i32, sig: i32) {
-    ptrace_resume(libc::PTRACE_CONT, pid, sig);
-}
-
 // glibc declares ptrace's request as an unsigned int, musl as an int.
 #[cfg(target_env = "musl")]
 type Request = libc::c_int;
@@ -453,6 +482,7 @@ struct SyscallInfo {
 }
 
 const PTRACE_GET_SYSCALL_INFO: Request = 0x420e;
+const PTRACE_SYSCALL_INFO_ENTRY: u8 = 1;
 const PTRACE_SYSCALL_INFO_EXIT: u8 = 2;
 const PTRACE_SYSCALL_INFO_SECCOMP: u8 = 3;
 
