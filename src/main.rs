@@ -98,6 +98,7 @@ fn main() {
         dump,
         agg: Aggregator::default(),
         warnings: Vec::new(),
+        procs: Default::default(),
         started: Instant::now(),
     };
 
@@ -115,7 +116,14 @@ fn main() {
         match Msg::read(&mut rx) {
             Ok(Some(Msg::Event(ev))) => sink.event(&ev),
             Ok(Some(Msg::Warning(w))) => sink.warnings.push(w),
+            Ok(Some(Msg::Spawn { parent, child })) => {
+                sink.procs.entry(child).or_default().ppid = Some(parent);
+            }
+            Ok(Some(Msg::ProcExit { pid, exit })) => {
+                sink.procs.entry(pid).or_default().exit = Some(exit)
+            }
             Ok(Some(Msg::Started { pid })) => {
+                sink.procs.entry(pid).or_default();
                 ROOT.store(pid, Ordering::SeqCst);
                 let sig = PENDING.swap(0, Ordering::SeqCst);
                 if sig != 0 {
@@ -150,6 +158,10 @@ fn main() {
     };
 
     let elapsed = started.elapsed();
+    sink.procs
+        .entry(ROOT.load(Ordering::SeqCst))
+        .or_default()
+        .exit = Some(exit_status);
 
     let mut gave_up = false;
     if args.wait && !running.is_empty() {
@@ -164,6 +176,12 @@ fn main() {
                 }
                 Ok(Some(Msg::Event(ev))) => sink.event(&ev),
                 Ok(Some(Msg::Warning(w))) => sink.warnings.push(w),
+                Ok(Some(Msg::Spawn { parent, child })) => {
+                    sink.procs.entry(child).or_default().ppid = Some(parent);
+                }
+                Ok(Some(Msg::ProcExit { pid, exit })) => {
+                    sink.procs.entry(pid).or_default().exit = Some(exit)
+                }
                 Ok(Some(_)) => {}
                 Err(e)
                     if e.kind() == io::ErrorKind::Interrupted
@@ -217,6 +235,7 @@ fn main() {
             filters: filter.to_json(),
             seccomp: !args.no_seccomp,
             execs: &sink.agg.execs,
+            procs: &sink.procs,
             warnings,
         };
         let _ = json::write(&mut out, &run, &records, &classes, &ctx);
@@ -302,6 +321,7 @@ struct Sink {
     dump: Option<io::BufWriter<File>>,
     agg: Aggregator,
     warnings: Vec<String>,
+    procs: std::collections::BTreeMap<i32, json::Proc>,
     started: Instant,
 }
 

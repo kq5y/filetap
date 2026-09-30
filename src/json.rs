@@ -13,6 +13,14 @@ use crate::backend::Exit;
 use crate::classify::{Class, Hidden};
 use crate::zone::{Context, Zone};
 
+/// What the tracer said about one process besides its execs.
+#[derive(Default)]
+pub struct Proc {
+    pub ppid: Option<i32>,
+    /// `None` while it's still running.
+    pub exit: Option<Exit>,
+}
+
 pub struct Run<'a> {
     pub command: &'a [std::ffi::OsString],
     pub started_at: SystemTime,
@@ -22,6 +30,7 @@ pub struct Run<'a> {
     pub filters: Value,
     pub seccomp: bool,
     pub execs: &'a [Exec],
+    pub procs: &'a BTreeMap<i32, Proc>,
     pub warnings: Vec<String>,
 }
 
@@ -90,17 +99,22 @@ pub fn write(
     }
 
     let processes: Vec<Value> = run
-        .execs
+        .procs
         .iter()
-        .map(|e| {
-            let argv: Vec<_> = e.argv.iter().map(|a| String::from_utf8_lossy(a)).collect();
-            json!({ "pid": e.pid, "exe": String::from_utf8_lossy(&e.path), "argv": argv })
+        .map(|(&pid, p)| {
+            // The program it ended up running, if it exec'd at all.
+            let exec = run.execs.iter().rev().find(|e| e.pid == pid);
+            let argv: Option<Vec<_>> =
+                exec.map(|e| e.argv.iter().map(|a| String::from_utf8_lossy(a)).collect());
+            json!({
+                "pid": pid,
+                "ppid": p.ppid,
+                "exe": exec.map(|e| String::from_utf8_lossy(&e.path)),
+                "argv": argv,
+                "exit": p.exit.map(exit_json),
+            })
         })
         .collect();
-    let (code, signal) = match run.exit {
-        Exit::Code(c) => (Some(c), None),
-        Exit::Signal(s) => (None, Some(s)),
-    };
     let bytes = |b: &[u8]| String::from_utf8_lossy(b).into_owned();
 
     let report = json!({
@@ -113,7 +127,7 @@ pub fn write(
         "home": ctx.home.as_deref().map(bytes),
         "started_at": rfc3339(run.started_at),
         "duration_ms": run.duration.as_millis() as u64,
-        "exit": { "code": code, "signal": signal },
+        "exit": exit_json(run.exit),
         "complete": run.complete,
         "filters": run.filters,
         "processes": processes,
@@ -124,6 +138,13 @@ pub fn write(
     });
     serde_json::to_writer_pretty(&mut *w, &report)?;
     writeln!(w)
+}
+
+fn exit_json(exit: Exit) -> Value {
+    match exit {
+        Exit::Code(c) => json!({ "code": c, "signal": null }),
+        Exit::Signal(s) => json!({ "code": null, "signal": s }),
+    }
 }
 
 fn hidden_reason(h: Hidden, zone: Zone) -> &'static str {

@@ -28,6 +28,16 @@ pub enum Msg {
     /// Something the report should mention, like a setuid program that
     /// couldn't get its privileges.
     Warning(String),
+    /// A new process (not a thread), and which process started it.
+    Spawn {
+        parent: i32,
+        child: i32,
+    },
+    /// A process (its last thread) is gone.
+    ProcExit {
+        pid: i32,
+        exit: Exit,
+    },
 }
 
 impl Msg {
@@ -52,16 +62,7 @@ impl Msg {
                 running,
             } => {
                 b.push(4);
-                match exit {
-                    Exit::Code(c) => {
-                        b.push(0);
-                        put_i32(&mut b, *c);
-                    }
-                    Exit::Signal(s) => {
-                        b.push(1);
-                        put_i32(&mut b, *s);
-                    }
-                }
+                put_exit(&mut b, *exit);
                 put_u32(&mut b, *procs);
                 put_u32(&mut b, running.len() as u32);
                 for (pid, comm) in running {
@@ -81,6 +82,16 @@ impl Msg {
                 b.push(7);
                 put_str(&mut b, s);
             }
+            Msg::Spawn { parent, child } => {
+                b.push(8);
+                put_i32(&mut b, *parent);
+                put_i32(&mut b, *child);
+            }
+            Msg::ProcExit { pid, exit } => {
+                b.push(9);
+                put_i32(&mut b, *pid);
+                put_exit(&mut b, *exit);
+            }
         }
         b
     }
@@ -99,10 +110,7 @@ impl Msg {
             2 => Msg::Failed(get_str(r)?),
             3 => Msg::ExecFailed { errno: get_i32(r)? },
             4 => {
-                let exit = match get_u8(r)? {
-                    0 => Exit::Code(get_i32(r)?),
-                    _ => Exit::Signal(get_i32(r)?),
-                };
+                let exit = get_exit(r)?;
                 let procs = get_u32(r)?;
                 let n = get_u32(r)?;
                 let mut running = Vec::with_capacity(n as usize);
@@ -118,6 +126,14 @@ impl Msg {
             5 => Msg::Done { procs: get_u32(r)? },
             6 => Msg::Event(get_event(r)?),
             7 => Msg::Warning(get_str(r)?),
+            8 => Msg::Spawn {
+                parent: get_i32(r)?,
+                child: get_i32(r)?,
+            },
+            9 => Msg::ProcExit {
+                pid: get_i32(r)?,
+                exit: get_exit(r)?,
+            },
             t => {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
@@ -127,6 +143,26 @@ impl Msg {
         };
         Ok(Some(msg))
     }
+}
+
+fn put_exit(b: &mut Vec<u8>, exit: Exit) {
+    match exit {
+        Exit::Code(c) => {
+            b.push(0);
+            put_i32(b, c);
+        }
+        Exit::Signal(s) => {
+            b.push(1);
+            put_i32(b, s);
+        }
+    }
+}
+
+fn get_exit(r: &mut impl Read) -> io::Result<Exit> {
+    Ok(match get_u8(r)? {
+        0 => Exit::Code(get_i32(r)?),
+        _ => Exit::Signal(get_i32(r)?),
+    })
 }
 
 fn put_event(b: &mut Vec<u8>, ev: &SysEvent) {
@@ -360,6 +396,14 @@ mod tests {
                 running: vec![(1234, "esbuild".into()), (1301, "node".into())],
             },
             Msg::Done { procs: 9 },
+            Msg::Spawn {
+                parent: 1,
+                child: 2,
+            },
+            Msg::ProcExit {
+                pid: 2,
+                exit: Exit::Code(3),
+            },
             Msg::Event(SysEvent {
                 pid: 7,
                 call: Call::Rename {

@@ -201,15 +201,18 @@ impl State {
 
     fn handle(&mut self, (pid, status): (i32, i32)) {
         if libc::WIFEXITED(status) || libc::WIFSIGNALED(status) {
-            self.live.remove(&pid);
+            let tgid = self.live.remove(&pid);
             self.pending.remove(&pid);
+            let exit = if libc::WIFEXITED(status) {
+                Exit::Code(libc::WEXITSTATUS(status))
+            } else {
+                Exit::Signal(libc::WTERMSIG(status))
+            };
             if pid == self.root {
-                let exit = if libc::WIFEXITED(status) {
-                    Exit::Code(libc::WEXITSTATUS(status))
-                } else {
-                    Exit::Signal(libc::WTERMSIG(status))
-                };
                 self.root_exited(exit);
+            } else if tgid == Some(pid) {
+                // The leader's exit is reported last, so this is the process.
+                self.send(&Msg::ProcExit { pid, exit });
             }
             return;
         }
@@ -260,7 +263,12 @@ impl State {
             }
             libc::PTRACE_EVENT_FORK | libc::PTRACE_EVENT_VFORK | libc::PTRACE_EVENT_CLONE => {
                 if let Ok(child) = ptrace::getevent(Pid::from_raw(pid)) {
-                    self.seen(child as i32);
+                    let child = child as i32;
+                    self.seen(child);
+                    if self.live.get(&child) == Some(&child) {
+                        let parent = self.live.get(&pid).copied().unwrap_or(pid);
+                        self.send(&Msg::Spawn { parent, child });
+                    }
                 }
                 0
             }
