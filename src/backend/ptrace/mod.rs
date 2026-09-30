@@ -52,6 +52,12 @@ impl SavedSignals {
         SavedSignals(saved)
     }
 
+    pub fn is_ignored(&self, sig: i32) -> bool {
+        self.0
+            .iter()
+            .any(|(s, act)| *s == sig && act.sa_sigaction == libc::SIG_IGN)
+    }
+
     fn restore(&self) {
         for (sig, act) in &self.0 {
             // Rust's runtime ignores SIGPIPE before main; the command

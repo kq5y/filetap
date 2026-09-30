@@ -5,10 +5,12 @@ mod launch;
 use std::ffi::OsString;
 use std::io::{self, Write};
 use std::process::exit;
+use std::sync::atomic::{AtomicI32, Ordering};
 use std::time::{Duration, Instant};
 
 use clap::Parser;
 use nix::errno::Errno;
+use nix::sys::signal::{SaFlags, SigAction, SigHandler, SigSet, Signal, sigaction};
 
 use backend::Exit;
 use backend::ptrace::{self, Msg, SavedSignals};
@@ -37,6 +39,20 @@ fn main() {
         // SAFETY: SIG_IGN is a valid disposition.
         unsafe { libc::signal(sig, libc::SIG_IGN) };
     }
+    // Unlike Ctrl-C, these are usually sent to filetap alone (kill, a CI
+    // runner's timeout, a closed ssh session), so pass them on.
+    for sig in [Signal::SIGTERM, Signal::SIGHUP] {
+        if saved.is_ignored(sig as i32) {
+            continue;
+        }
+        let act = SigAction::new(
+            SigHandler::Handler(forward),
+            SaFlags::SA_RESTART,
+            SigSet::empty(),
+        );
+        // SAFETY: forward only touches atomics and calls kill(2).
+        let _ = unsafe { sigaction(sig, &act) };
+    }
 
     let mut rx = match ptrace::start(&prog, &args.command, &saved) {
         Ok(t) => t,
@@ -49,7 +65,14 @@ fn main() {
 
     let (exit_status, procs, running) = loop {
         match Msg::read(&mut rx) {
-            Ok(Some(Msg::Started { .. })) => {}
+            Ok(Some(Msg::Started { pid })) => {
+                ROOT.store(pid, Ordering::SeqCst);
+                let sig = PENDING.swap(0, Ordering::SeqCst);
+                if sig != 0 {
+                    // SAFETY: plain kill(2).
+                    unsafe { libc::kill(pid, sig) };
+                }
+            }
             Ok(Some(Msg::Failed(e))) => {
                 eprintln!("filetap: {e}");
                 exit(125);
@@ -86,6 +109,19 @@ fn main() {
         &running,
     );
     exit(exit_status.code());
+}
+
+static ROOT: AtomicI32 = AtomicI32::new(0);
+static PENDING: AtomicI32 = AtomicI32::new(0);
+
+extern "C" fn forward(sig: libc::c_int) {
+    match ROOT.load(Ordering::SeqCst) {
+        0 => PENDING.store(sig, Ordering::SeqCst),
+        // SAFETY: kill(2) is async-signal-safe.
+        pid => unsafe {
+            libc::kill(pid, sig);
+        },
+    }
 }
 
 fn header(
@@ -131,7 +167,7 @@ fn header(
 }
 
 fn signame(sig: i32) -> String {
-    match nix::sys::signal::Signal::try_from(sig) {
+    match Signal::try_from(sig) {
         Ok(s) => s.as_str().to_string(),
         Err(_) => format!("signal {sig}"),
     }
