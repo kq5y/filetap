@@ -253,16 +253,12 @@ impl Report<'_> {
         let chain: Vec<&[u8]> = ancestors(p, &self.ctx.fold_base(p)).collect();
         for (k, &a) in chain.iter().enumerate() {
             let n = counts[a];
-            if point.as_deref() == Some(a) && n >= 2 {
-                return Some(a);
-            }
-            if n >= FOLD_MIN {
-                let deepest = chain[k..]
+            if (point.as_deref() == Some(a) && n >= 2) || n >= FOLD_MIN {
+                return chain[k..]
                     .iter()
                     .take_while(|&&b| counts[b] == n)
                     .last()
                     .copied();
-                return deepest;
             }
         }
         None
@@ -338,7 +334,11 @@ impl Report<'_> {
         if !self.all && !hidden.is_empty() {
             let parts: Vec<String> = ["system/toolchain", "virtual", "lookup probes", "temp files"]
                 .iter()
-                .filter_map(|k| hidden.get(k).map(|n| format!("{} {k}", count(*n))))
+                .filter_map(|k| {
+                    let n = *hidden.get(k)?;
+                    let k = if n == 1 { k.trim_end_matches('s') } else { k };
+                    Some(format!("{} {k}", count(n)))
+                })
                 .collect();
             writeln!(w, "  not shown: {} (use -a)", parts.join(", "))?;
         }
