@@ -6,9 +6,13 @@ use std::collections::BTreeMap;
 use std::io::{self, Write};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use serde_json::{Map, Value, json};
+use std::borrow::Cow;
 
-use crate::aggregate::{Exec, Kind, Record};
+use serde::Serialize;
+use serde::ser::{SerializeMap, Serializer};
+use serde_json::Value;
+
+use crate::aggregate::{self, Exec, Kind, Record};
 use crate::backend::Exit;
 use crate::classify::{Class, Hidden};
 use crate::zone::{Context, Zone};
@@ -41,110 +45,254 @@ pub fn write(
     classes: &[Class],
     ctx: &Context,
 ) -> io::Result<()> {
-    let mut files = Vec::new();
     let mut hidden_counts: BTreeMap<&str, usize> = BTreeMap::new();
     let mut summary: BTreeMap<&str, usize> = BTreeMap::new();
-
     for (r, c) in records.iter().zip(classes) {
-        if c.hidden == Some(Hidden::Filtered) {
-            continue;
-        }
-        let zone = ctx.zone(&r.path);
-        let reason = c.hidden.map(|h| hidden_reason(h, zone));
-        match reason {
-            Some(why) => *hidden_counts.entry(why).or_default() += 1,
+        match c.hidden {
+            Some(Hidden::Filtered) => {}
+            Some(h) => {
+                *hidden_counts
+                    .entry(hidden_reason(h, ctx.zone(&r.path)))
+                    .or_default() += 1
+            }
             None => *summary.entry(c.bucket.name()).or_default() += 1,
         }
-
-        let mut f = Map::new();
-        f.insert("path".into(), json!(String::from_utf8_lossy(&r.path)));
-        if std::str::from_utf8(&r.path).is_err() {
-            f.insert("path_b64".into(), json!(base64(&r.path)));
-        }
-        f.insert("display".into(), json!(ctx.display(&r.path)));
-        f.insert("zone".into(), json!(zone.name()));
-        f.insert("kind".into(), json!(r.kind_after.map(kind_name)));
-        f.insert("bucket".into(), json!(c.bucket.name()));
-        f.insert(
-            "visibility".into(),
-            json!(if reason.is_some() { "hidden" } else { "shown" }),
-        );
-        if let Some(why) = reason {
-            f.insert("hidden_reason".into(), json!(why));
-        }
-        f.insert("ops".into(), ops(r));
-        f.insert("errors".into(), errors(r));
-        f.insert(
-            "existed_before".into(),
-            json!(match r.before {
-                Some(true) => "yes",
-                Some(false) => "no",
-                None => "unknown",
-            }),
-        );
-        f.insert("exists_after".into(), json!(r.kind_after.is_some()));
-        let path_of = |i: Option<usize>| i.map(|i| String::from_utf8_lossy(&records[i].path));
-        f.insert("moved_from".into(), json!(path_of(r.moved_from)));
-        f.insert("moved_to".into(), json!(path_of(r.moved_to)));
-        f.insert("atomic".into(), json!(c.atomic));
-        let lookups: Vec<_> = c
-            .lookups_before
-            .iter()
-            .map(|&i| String::from_utf8_lossy(&records[i].path))
-            .collect();
-        f.insert("lookups_before".into(), json!(lookups));
-        f.insert("pids".into(), json!(r.pids));
-        f.insert("first_seen_ms".into(), json!(r.first_seen_ms));
-        files.push(Value::Object(f));
     }
 
-    let processes: Vec<Value> = run
+    let processes: Vec<Process> = run
         .procs
         .iter()
         .map(|(&pid, p)| {
             // The program it ended up running, if it exec'd at all.
             let exec = run.execs.iter().rev().find(|e| e.pid == pid);
-            let argv: Option<Vec<_>> =
-                exec.map(|e| e.argv.iter().map(|a| String::from_utf8_lossy(a)).collect());
-            json!({
-                "pid": pid,
-                "ppid": p.ppid,
-                "exe": exec.map(|e| String::from_utf8_lossy(&e.path)),
-                "argv": argv,
-                "exit": p.exit.map(exit_json),
-            })
+            Process {
+                pid,
+                ppid: p.ppid,
+                exe: exec.map(|e| lossy(&e.path)),
+                argv: exec.map(|e| e.argv.iter().map(|a| lossy(a)).collect()),
+                exit: p.exit.map(ExitStatus::from),
+            }
         })
         .collect();
-    let bytes = |b: &[u8]| String::from_utf8_lossy(b).into_owned();
 
-    let report = json!({
-        "schema": "filetap.report/v1",
-        "filetap_version": env!("CARGO_PKG_VERSION"),
-        "backend": { "name": "ptrace", "seccomp": run.seccomp },
-        "command": run.command.iter().map(|a| a.to_string_lossy()).collect::<Vec<_>>(),
-        "cwd": bytes(&ctx.cwd),
-        "root": bytes(&ctx.root),
-        "home": ctx.home.as_deref().map(bytes),
-        "started_at": rfc3339(run.started_at),
-        "duration_ms": run.duration.as_millis() as u64,
-        "exit": exit_json(run.exit),
-        "complete": run.complete,
-        "filters": run.filters,
-        "processes": processes,
-        "files": files,
-        "hidden_counts": hidden_counts,
-        "summary": summary,
-        "warnings": run.warnings,
-    });
+    let report = Report {
+        schema: "filetap.report/v1",
+        filetap_version: env!("CARGO_PKG_VERSION"),
+        backend: Backend {
+            name: "ptrace",
+            seccomp: run.seccomp,
+        },
+        command: run.command.iter().map(|a| a.to_string_lossy()).collect(),
+        cwd: lossy(&ctx.cwd),
+        root: lossy(&ctx.root),
+        home: ctx.home.as_deref().map(lossy),
+        started_at: rfc3339(run.started_at),
+        duration_ms: run.duration.as_millis() as u64,
+        exit: run.exit.into(),
+        complete: run.complete,
+        filters: &run.filters,
+        processes,
+        files: Files {
+            records,
+            classes,
+            ctx,
+        },
+        hidden_counts,
+        summary,
+        warnings: &run.warnings,
+    };
+    // Entries are built one at a time while writing, so a trace with a
+    // hundred thousand paths doesn't need a second copy of all of them.
     serde_json::to_writer_pretty(&mut *w, &report)?;
     writeln!(w)
 }
 
-fn exit_json(exit: Exit) -> Value {
-    match exit {
-        Exit::Code(c) => json!({ "code": c, "signal": null }),
-        Exit::Signal(s) => json!({ "code": null, "signal": s }),
+#[derive(Serialize)]
+struct Report<'a> {
+    schema: &'static str,
+    filetap_version: &'static str,
+    backend: Backend,
+    command: Vec<Cow<'a, str>>,
+    cwd: Cow<'a, str>,
+    root: Cow<'a, str>,
+    home: Option<Cow<'a, str>>,
+    started_at: String,
+    duration_ms: u64,
+    exit: ExitStatus,
+    complete: bool,
+    filters: &'a Value,
+    processes: Vec<Process<'a>>,
+    files: Files<'a>,
+    hidden_counts: BTreeMap<&'static str, usize>,
+    summary: BTreeMap<&'static str, usize>,
+    warnings: &'a [String],
+}
+
+#[derive(Serialize)]
+struct Backend {
+    name: &'static str,
+    seccomp: bool,
+}
+
+#[derive(Serialize)]
+struct Process<'a> {
+    pid: i32,
+    ppid: Option<i32>,
+    exe: Option<Cow<'a, str>>,
+    argv: Option<Vec<Cow<'a, str>>>,
+    exit: Option<ExitStatus>,
+}
+
+#[derive(Serialize)]
+struct ExitStatus {
+    code: Option<i32>,
+    signal: Option<i32>,
+}
+
+impl From<Exit> for ExitStatus {
+    fn from(e: Exit) -> ExitStatus {
+        match e {
+            Exit::Code(c) => ExitStatus {
+                code: Some(c),
+                signal: None,
+            },
+            Exit::Signal(s) => ExitStatus {
+                code: None,
+                signal: Some(s),
+            },
+        }
     }
+}
+
+struct Files<'a> {
+    records: &'a [Record],
+    classes: &'a [Class],
+    ctx: &'a Context,
+}
+
+impl Serialize for Files<'_> {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        let records = self.records;
+        s.collect_seq(
+            records
+                .iter()
+                .zip(self.classes)
+                .filter(|(_, c)| c.hidden != Some(Hidden::Filtered))
+                .map(|(r, c)| {
+                    let zone = self.ctx.zone(&r.path);
+                    let path_of = |i: Option<usize>| i.map(|i| lossy(&records[i].path));
+                    File {
+                        path: lossy(&r.path),
+                        path_b64: std::str::from_utf8(&r.path)
+                            .is_err()
+                            .then(|| base64(&r.path)),
+                        display: self.ctx.display(&r.path),
+                        zone: zone.name(),
+                        kind: r.kind_after.map(kind_name),
+                        bucket: c.bucket.name(),
+                        visibility: if c.hidden.is_some() {
+                            "hidden"
+                        } else {
+                            "shown"
+                        },
+                        hidden_reason: c.hidden.map(|h| hidden_reason(h, zone)),
+                        ops: Ops(&r.ops),
+                        errors: Errors(&r.errors),
+                        existed_before: match r.before {
+                            Some(true) => "yes",
+                            Some(false) => "no",
+                            None => "unknown",
+                        },
+                        exists_after: r.kind_after.is_some(),
+                        moved_from: path_of(r.moved_from),
+                        moved_to: path_of(r.moved_to),
+                        atomic: c.atomic,
+                        lookups_before: c
+                            .lookups_before
+                            .iter()
+                            .map(|&i| lossy(&records[i].path))
+                            .collect(),
+                        pids: &r.pids,
+                        first_seen_ms: r.first_seen_ms,
+                    }
+                }),
+        )
+    }
+}
+
+#[derive(Serialize)]
+struct File<'a> {
+    path: Cow<'a, str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    path_b64: Option<String>,
+    display: String,
+    zone: &'static str,
+    kind: Option<&'static str>,
+    bucket: &'static str,
+    visibility: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    hidden_reason: Option<&'static str>,
+    ops: Ops<'a>,
+    errors: Errors<'a>,
+    existed_before: &'static str,
+    exists_after: bool,
+    moved_from: Option<Cow<'a, str>>,
+    moved_to: Option<Cow<'a, str>>,
+    atomic: bool,
+    lookups_before: Vec<Cow<'a, str>>,
+    pids: &'a [i32],
+    first_seen_ms: u64,
+}
+
+/// Only the counts that aren't zero.
+struct Ops<'a>(&'a aggregate::Ops);
+struct Errors<'a>(&'a aggregate::Errors);
+
+impl Serialize for Ops<'_> {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        let o = self.0;
+        nonzero(
+            s,
+            &[
+                ("read", o.read),
+                ("list", o.list),
+                ("write", o.write),
+                ("create", o.create),
+                ("delete", o.delete),
+                ("exec", o.exec),
+                ("stat", o.stat),
+                ("attr", o.attr),
+                ("moved_in", o.moved_in),
+                ("moved_out", o.moved_out),
+            ],
+        )
+    }
+}
+
+impl Serialize for Errors<'_> {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        let e = self.0;
+        nonzero(
+            s,
+            &[
+                ("missing", e.missing),
+                ("denied", e.denied),
+                ("other", e.other),
+            ],
+        )
+    }
+}
+
+fn nonzero<S: Serializer>(s: S, counts: &[(&str, u32)]) -> Result<S::Ok, S::Error> {
+    let mut m = s.serialize_map(None)?;
+    for (k, n) in counts.iter().filter(|(_, n)| *n > 0) {
+        m.serialize_entry(k, n)?;
+    }
+    m.end()
+}
+
+fn lossy(b: &[u8]) -> Cow<'_, str> {
+    String::from_utf8_lossy(b)
 }
 
 fn hidden_reason(h: Hidden, zone: Zone) -> &'static str {
@@ -168,41 +316,6 @@ fn kind_name(k: Kind) -> &'static str {
         Kind::Symlink => "symlink",
         Kind::Other => "other",
     }
-}
-
-fn ops(r: &Record) -> Value {
-    let o = &r.ops;
-    let all = [
-        ("read", o.read),
-        ("list", o.list),
-        ("write", o.write),
-        ("create", o.create),
-        ("delete", o.delete),
-        ("exec", o.exec),
-        ("stat", o.stat),
-        ("attr", o.attr),
-        ("moved_in", o.moved_in),
-        ("moved_out", o.moved_out),
-    ];
-    nonzero(&all)
-}
-
-fn errors(r: &Record) -> Value {
-    let e = &r.errors;
-    nonzero(&[
-        ("missing", e.missing),
-        ("denied", e.denied),
-        ("other", e.other),
-    ])
-}
-
-fn nonzero(counts: &[(&str, u32)]) -> Value {
-    let m: Map<String, Value> = counts
-        .iter()
-        .filter(|(_, n)| *n > 0)
-        .map(|(k, n)| (k.to_string(), json!(n)))
-        .collect();
-    Value::Object(m)
 }
 
 fn base64(b: &[u8]) -> String {
