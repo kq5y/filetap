@@ -353,24 +353,36 @@ pub fn normalize(p: &[u8]) -> Vec<u8> {
     out
 }
 
-/// Looks at every path once the command is done.
+/// Looks at every path once the command is done. A stat each, spread over
+/// a few threads: with a hundred thousand paths this is most of the time
+/// between the command exiting and the report.
 pub fn enrich(records: &mut [Record]) {
-    for r in records {
-        r.kind_after = fs::symlink_metadata(OsStr::from_bytes(&r.path))
-            .ok()
-            .map(|m| {
-                let t = m.file_type();
-                if t.is_dir() {
-                    Kind::Dir
-                } else if t.is_symlink() {
-                    Kind::Symlink
-                } else if t.is_file() {
-                    Kind::File
-                } else {
-                    Kind::Other
+    let threads = std::thread::available_parallelism().map_or(1, |n| n.get().min(8));
+    let chunk = records.len().div_ceil(threads).max(1);
+    std::thread::scope(|s| {
+        for part in records.chunks_mut(chunk) {
+            s.spawn(|| {
+                for r in part {
+                    r.kind_after = kind(&r.path);
                 }
             });
-    }
+        }
+    });
+}
+
+fn kind(path: &[u8]) -> Option<Kind> {
+    let t = fs::symlink_metadata(OsStr::from_bytes(path))
+        .ok()?
+        .file_type();
+    Some(if t.is_dir() {
+        Kind::Dir
+    } else if t.is_symlink() {
+        Kind::Symlink
+    } else if t.is_file() {
+        Kind::File
+    } else {
+        Kind::Other
+    })
 }
 
 #[cfg(test)]
