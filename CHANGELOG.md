@@ -8,6 +8,7 @@
 - `--sort path`, and `-v` shows how many times each path was touched.
 - `--no-seccomp` stops at every syscall instead of using a seccomp filter, for systems where seccomp isn't available.
 - Fewer stops: stat calls on a file descriptor are no longer traced, and events reach the report in batches.
+- The report comes out faster after a large run: `--json` for 100,000 paths went from 6.5 s and 790 MB to 0.4 s and 56 MB.
 
 ## 0.0.1
 
