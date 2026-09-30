@@ -108,8 +108,9 @@ pub fn decode(tid: i32, nr: i64, a: [u64; 6]) -> Option<Call> {
             path: t.path(CWD, a[0])?,
         },
         libc::SYS_execve => t.exec(CWD, a[0], a[1])?,
-        // TODO: execveat(fd, "", ..., AT_EMPTY_PATH) (fexecve) is skipped
-        // because the path is empty; resolve it through /proc/<tid>/fd.
+        libc::SYS_execveat if flags(4) & libc::AT_EMPTY_PATH != 0 && t.empty(a[1]) => {
+            t.fexec(fd(0), a[2])?
+        }
         libc::SYS_execveat => t.exec(fd(0), a[1], a[2])?,
         libc::SYS_mkdirat | libc::SYS_mknodat => Call::Mkdir {
             path: t.path(fd(0), a[1])?,
@@ -218,6 +219,23 @@ impl Tracee {
             path: self.path(dirfd, addr)?,
             argv: self.argv(argv),
         })
+    }
+
+    /// fexecve(): the program is whatever file `fd` refers to. Programs run
+    /// from a memfd have no path to report.
+    fn fexec(&self, fd: i32, argv: u64) -> Option<Call> {
+        let path = self.dir_path(fd).filter(|p| !p.starts_with(b"/memfd:"))?;
+        Some(Call::Exec {
+            path: PathArg {
+                dir: None,
+                raw: path,
+            },
+            argv: self.argv(argv),
+        })
+    }
+
+    fn empty(&self, addr: u64) -> bool {
+        addr == 0 || self.read_cstr(addr).is_some_and(|p| p.is_empty())
     }
 
     fn rename(&self, olddirfd: i32, old: u64, newdirfd: i32, new: u64, flags: u32) -> Option<Call> {
