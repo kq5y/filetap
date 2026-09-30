@@ -1,4 +1,5 @@
 use std::ffi::OsString;
+use std::path::PathBuf;
 
 use clap::Parser;
 
@@ -8,9 +9,13 @@ use clap::Parser;
     about = "See what files a command actually touches",
     after_help = "Examples:
   filetap -- npm test
-  filetap -- make"
+  filetap -o report.txt -- make"
 )]
 pub struct Args {
+    /// Write the report to FILE instead of stderr ("-" for stdout)
+    #[arg(short, long, value_name = "FILE")]
+    pub output: Option<PathBuf>,
+
     /// Keep tracing until background processes started by the command exit
     #[arg(long)]
     pub wait: bool,

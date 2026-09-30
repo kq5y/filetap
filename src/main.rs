@@ -3,7 +3,9 @@ mod cli;
 mod launch;
 
 use std::ffi::OsString;
+use std::fs::File;
 use std::io::{self, Write};
+use std::path::Path;
 use std::process::exit;
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::time::{Duration, Instant};
@@ -136,7 +138,11 @@ fn main() {
         }
     }
 
-    let mut out = io::stderr().lock();
+    let (mut out, shared) = report_writer(args.output.as_deref());
+    if shared {
+        // Separates the report from whatever the command printed last.
+        let _ = writeln!(out);
+    }
     let _ = header(
         &mut out,
         &args.command,
@@ -151,7 +157,29 @@ fn main() {
             "filetap: stopped waiting for background processes; their later file access is not in this report"
         );
     }
+    let _ = out.flush();
     exit(exit_status.code());
+}
+
+/// Opened only after the command is done, so a command that reads the
+/// report file (or its directory) doesn't see it truncated. The flag says
+/// whether the report shares a stream with the command's own output.
+fn report_writer(path: Option<&Path>) -> (Box<dyn Write>, bool) {
+    match path {
+        None => (Box::new(io::stderr()), true),
+        Some(p) if p == Path::new("-") => (Box::new(io::stdout()), true),
+        Some(p) => match File::create(p) {
+            Ok(f) => (Box::new(io::BufWriter::new(f)), false),
+            Err(e) => {
+                eprintln!(
+                    "filetap: {}: {}; writing the report to stderr",
+                    p.display(),
+                    ioerr(&e)
+                );
+                (Box::new(io::stderr()), true)
+            }
+        },
+    }
 }
 
 static ROOT: AtomicI32 = AtomicI32::new(0);
@@ -173,7 +201,7 @@ extern "C" fn forward(sig: libc::c_int) {
 }
 
 fn header(
-    w: &mut impl Write,
+    w: &mut dyn Write,
     command: &[OsString],
     exit: Exit,
     elapsed: Duration,
@@ -190,7 +218,6 @@ fn header(
         Exit::Signal(s) => format!("was killed by {}", signame(s)),
     };
     let plural = if procs == 1 { "process" } else { "processes" };
-    writeln!(w)?;
     writeln!(
         w,
         "filetap: {cmd} {how} after {:.2}s ({procs} {plural})",
@@ -218,6 +245,13 @@ fn signame(sig: i32) -> String {
     match Signal::try_from(sig) {
         Ok(s) => s.as_str().to_string(),
         Err(_) => format!("signal {sig}"),
+    }
+}
+
+fn ioerr(e: &io::Error) -> String {
+    match e.raw_os_error() {
+        Some(n) => lower(Errno::from_raw(n).desc()),
+        None => e.to_string(),
     }
 }
 
