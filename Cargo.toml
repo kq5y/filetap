@@ -7,3 +7,7 @@ license = "MIT OR Apache-2.0"
 repository = "https://github.com/kq5y/filetap"
 
 [dependencies]
+anyhow = "1.0.104"
+clap = { version = "4.6.7", features = ["derive"] }
+libc = "0.2.189"
+nix = { version = "0.31.3", features = ["ptrace", "signal", "process", "fs"] }
