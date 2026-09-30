@@ -1,8 +1,10 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ffi::{CStr, CString};
 use std::fs::{self, File};
 use std::io::{BufWriter, Read, Write};
 use std::os::fd::AsRawFd;
+use std::os::unix::fs::PermissionsExt;
+use std::path::PathBuf;
 use std::{process, ptr};
 
 use nix::errno::Errno;
@@ -131,6 +133,8 @@ struct State {
     live: HashMap<i32, i32>,
     /// Decoded at the seccomp stop, waiting for the syscall-exit-stop.
     pending: HashMap<i32, Call>,
+    /// Programs already checked by `check_exec`.
+    checked: HashSet<PathBuf>,
     procs: u32,
 }
 
@@ -145,6 +149,7 @@ impl State {
             exec_err,
             live: HashMap::from([(root, root)]),
             pending: HashMap::new(),
+            checked: HashSet::new(),
             procs: 1,
         }
     }
@@ -264,11 +269,43 @@ impl State {
                 if pid == self.root {
                     self.root_execed = true;
                 }
+                self.check_exec(pid);
                 0
             }
             _ => 0,
         };
         cont(pid, inject);
+    }
+
+    /// Warns about programs that run under filetap but not the way they
+    /// would without it, once per program.
+    fn check_exec(&mut self, pid: i32) {
+        let exe = format!("/proc/{pid}/exe");
+        let Ok(path) = fs::read_link(&exe) else {
+            return;
+        };
+        if !self.checked.insert(path.clone()) {
+            return;
+        }
+        let mode = fs::metadata(&exe).map_or(0, |m| m.permissions().mode());
+        if mode & (libc::S_ISUID | libc::S_ISGID) != 0 && no_new_privs(pid) {
+            self.send(&Msg::Warning(format!(
+                "{} is setuid and ran without its privileges; to trace it, run filetap itself with sudo",
+                path.display()
+            )));
+        }
+        let mut header = [0u8; 5];
+        if File::open(&exe)
+            .and_then(|mut f| f.read_exact(&mut header))
+            .is_ok()
+            && header[..4] == *b"\x7fELF"
+            && header[4] == 1
+        {
+            self.send(&Msg::Warning(format!(
+                "{} is a 32-bit program; its file access is not traced",
+                path.display()
+            )));
+        }
     }
 
     fn syscall_entry(&mut self, pid: i32) {
@@ -438,6 +475,17 @@ fn syscall_info(pid: i32) -> Option<SyscallInfo> {
         )
     };
     (r > 0).then_some(info)
+}
+
+/// Set when the seccomp filter had to be installed without privileges;
+/// setuid bits are ignored from then on.
+fn no_new_privs(pid: i32) -> bool {
+    fs::read_to_string(format!("/proc/{pid}/status")).is_ok_and(|s| {
+        s.lines().any(|l| {
+            l.strip_prefix("NoNewPrivs:")
+                .is_some_and(|v| v.trim() == "1")
+        })
+    })
 }
 
 fn read_tgid(tid: i32) -> Option<i32> {

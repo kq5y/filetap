@@ -97,6 +97,7 @@ fn main() {
     let mut sink = Sink {
         dump,
         agg: Aggregator::default(),
+        warnings: Vec::new(),
         started: Instant::now(),
     };
 
@@ -113,6 +114,7 @@ fn main() {
     let (exit_status, mut procs, mut running) = loop {
         match Msg::read(&mut rx) {
             Ok(Some(Msg::Event(ev))) => sink.event(&ev),
+            Ok(Some(Msg::Warning(w))) => sink.warnings.push(w),
             Ok(Some(Msg::Started { pid })) => {
                 ROOT.store(pid, Ordering::SeqCst);
                 let sig = PENDING.swap(0, Ordering::SeqCst);
@@ -161,6 +163,7 @@ fn main() {
                     break;
                 }
                 Ok(Some(Msg::Event(ev))) => sink.event(&ev),
+                Ok(Some(Msg::Warning(w))) => sink.warnings.push(w),
                 Ok(Some(_)) => {}
                 Err(e)
                     if e.kind() == io::ErrorKind::Interrupted
@@ -188,7 +191,7 @@ fn main() {
     let mut classes = classify::classify(&records, &ctx);
     filter.apply(&records, &mut classes, &ctx);
 
-    let mut warnings = Vec::new();
+    let mut warnings = sink.warnings.clone();
     if !running.is_empty() {
         warnings.push(format!(
             "{} background processes still running; their later file access is not in this report",
@@ -237,6 +240,9 @@ fn main() {
             out,
             "filetap: stopped waiting for background processes; their later file access is not in this report"
         );
+    }
+    for w in &sink.warnings {
+        let _ = writeln!(out, "filetap: {w}");
     }
     // libuv sets up io_uring in every node process just to batch epoll
     // calls, so saying this by default would mostly be a false alarm.
@@ -293,6 +299,7 @@ fn report_writer(path: Option<&Path>) -> (Box<dyn Write>, bool) {
 struct Sink {
     dump: Option<io::BufWriter<File>>,
     agg: Aggregator,
+    warnings: Vec<String>,
     started: Instant,
 }
 

@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- Says so when a setuid program ran without its privileges, or a 32-bit program ran untraced.
+- Programs started with `fexecve` show up under EXEC.
+- Fewer stops: stat calls on a file descriptor are no longer traced, and events reach the report in batches.
+
 ## 0.0.1
 
 First release.

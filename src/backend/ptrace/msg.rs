@@ -25,6 +25,9 @@ pub enum Msg {
         procs: u32,
     },
     Event(SysEvent),
+    /// Something the report should mention, like a setuid program that
+    /// couldn't get its privileges.
+    Warning(String),
 }
 
 impl Msg {
@@ -74,6 +77,10 @@ impl Msg {
                 b.push(6);
                 put_event(&mut b, ev);
             }
+            Msg::Warning(s) => {
+                b.push(7);
+                put_str(&mut b, s);
+            }
         }
         b
     }
@@ -110,6 +117,7 @@ impl Msg {
             }
             5 => Msg::Done { procs: get_u32(r)? },
             6 => Msg::Event(get_event(r)?),
+            7 => Msg::Warning(get_str(r)?),
             t => {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,

@@ -171,9 +171,9 @@ processes keep working, but what they do afterwards isn't in the report.
 ## Caveats
 
 - Linux only, x86_64 and aarch64 (both tested in CI). 32-bit programs
-  aren't traced.
-- setuid programs lose their privileges: use `sudo filetap -- make install`,
-  not `filetap -- sudo make install`.
+  aren't traced; filetap warns when one runs.
+- setuid programs lose their privileges (filetap says when that happens):
+  use `sudo filetap -- make install`, not `filetap -- sudo make install`.
 - A debugger or tracer (`gdb`, `strace`) can't run under filetap.
 - Not seen: access through io_uring, or through file descriptors inherited
   from before the command started.
