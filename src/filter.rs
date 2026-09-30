@@ -16,6 +16,8 @@ pub struct Filter {
     outside: bool,
     hide: GlobSet,
     show: GlobSet,
+    hide_pats: Vec<String>,
+    show_pats: Vec<String>,
     /// For the header and the JSON: what was asked for, as it was typed.
     pub described: Vec<String>,
 }
@@ -52,7 +54,22 @@ impl Filter {
             outside: args.outside,
             hide: globs(&args.hide, ctx)?,
             show: globs(&args.show, ctx)?,
+            hide_pats: args.hide.clone(),
+            show_pats: args.show.clone(),
             described,
+        })
+    }
+
+    pub fn to_json(&self) -> serde_json::Value {
+        let only: Option<Vec<&str>> = self
+            .only
+            .as_ref()
+            .map(|o| o.iter().map(|b| b.name()).collect());
+        serde_json::json!({
+            "only": only,
+            "outside": self.outside,
+            "hide": self.hide_pats,
+            "show": self.show_pats,
         })
     }
 

@@ -42,6 +42,10 @@ pub struct Args {
     #[arg(short, long)]
     pub all: bool,
 
+    /// Write the report as JSON, hidden entries included
+    #[arg(long)]
+    pub json: bool,
+
     /// Write the report to FILE instead of stderr ("-" for stdout)
     #[arg(short, long, value_name = "FILE")]
     pub output: Option<PathBuf>,

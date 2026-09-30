@@ -73,6 +73,7 @@ pub struct Record {
     pub pids: Vec<i32>,
     /// Order of first appearance, used for sorting.
     pub first_seen: u64,
+    pub first_seen_ms: u64,
     /// Filled in by `enrich` after the run; `None` if it doesn't exist.
     pub kind_after: Option<Kind>,
 }
@@ -82,12 +83,23 @@ pub struct Aggregator {
     pub records: Vec<Record>,
     index: HashMap<Vec<u8>, usize>,
     seq: u64,
+    ms: u64,
     pub io_uring: bool,
+    pub execs: Vec<Exec>,
+}
+
+/// A successful execve.
+pub struct Exec {
+    pub pid: i32,
+    pub path: Vec<u8>,
+    pub argv: Vec<Vec<u8>>,
 }
 
 impl Aggregator {
-    pub fn add(&mut self, ev: &SysEvent) {
+    /// `ms` is when the event arrived, counted from the start of the run.
+    pub fn add(&mut self, ev: &SysEvent, ms: u64) {
         self.seq += 1;
+        self.ms = ms;
         let ok = ev.result.is_ok();
         match &ev.call {
             Call::Open {
@@ -144,9 +156,17 @@ impl Aggregator {
                     r.simple(ev.result, |o| &mut o.stat);
                 }
             }
-            Call::Exec { path, .. } => {
+            Call::Exec { path, argv } => {
                 if let Some(r) = self.rec(path, ev.pid) {
                     r.simple(ev.result, |o| &mut o.exec);
+                    if ok {
+                        let path = r.path.clone();
+                        self.execs.push(Exec {
+                            pid: ev.pid,
+                            path,
+                            argv: argv.clone(),
+                        });
+                    }
                 }
             }
             Call::Truncate { path } => {
@@ -258,6 +278,7 @@ impl Aggregator {
                     moved_to: None,
                     pids: Vec::new(),
                     first_seen: self.seq,
+                    first_seen_ms: self.ms,
                     kind_after: None,
                 });
                 i

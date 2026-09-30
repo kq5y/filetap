@@ -25,6 +25,21 @@ pub enum Bucket {
 }
 
 impl Bucket {
+    pub fn name(self) -> &'static str {
+        match self {
+            Bucket::Exec => "exec",
+            Bucket::Read => "read",
+            Bucket::Missing => "missing",
+            Bucket::Denied => "denied",
+            Bucket::Create => "create",
+            Bucket::Write => "write",
+            Bucket::Rename => "rename",
+            Bucket::Delete => "delete",
+            Bucket::Temp => "temp",
+            Bucket::Stat => "stat",
+        }
+    }
+
     pub fn is_change(self) -> bool {
         matches!(
             self,
@@ -314,7 +329,7 @@ mod tests {
     fn run(events: &[SysEvent], exists: &[&str]) -> Vec<(String, Bucket, Option<Hidden>)> {
         let mut agg = Aggregator::default();
         for e in events {
-            agg.add(e);
+            agg.add(e, 0);
         }
         for r in &mut agg.records {
             let p = String::from_utf8(r.path.clone()).unwrap();

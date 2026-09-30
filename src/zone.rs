@@ -23,6 +23,23 @@ pub enum Zone {
 }
 
 impl Zone {
+    pub fn name(self) -> &'static str {
+        match self {
+            Zone::Virtual => "virtual",
+            Zone::ProjectDeps => "project-deps",
+            Zone::Project => "project",
+            Zone::Toolchain => "toolchain",
+            Zone::HomeCache => "home-cache",
+            Zone::HomeConfig => "home-config",
+            Zone::Home => "home",
+            Zone::Temp => "temp",
+            Zone::SystemConfig => "system-config",
+            Zone::System => "system",
+            Zone::SystemState => "system-state",
+            Zone::External => "external",
+        }
+    }
+
     /// Reads here are noise unless asked for.
     pub fn hides_reads(self) -> bool {
         matches!(self, Zone::Virtual | Zone::Toolchain | Zone::System)
@@ -81,6 +98,8 @@ const ETC_NOISE: &[&str] = &[
     "/etc/netsvc.conf",
     // jemalloc's options.
     "/etc/malloc.conf",
+    // libselinux, linked into coreutils on many distros.
+    "/etc/selinux",
 ];
 
 const SYSTEM_DIRS: &[&str] = &[

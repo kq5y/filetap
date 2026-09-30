@@ -4,6 +4,7 @@ mod classify;
 mod cli;
 mod dump;
 mod filter;
+mod json;
 mod launch;
 mod text;
 mod zone;
@@ -14,7 +15,7 @@ use std::io::{self, Write};
 use std::path::Path;
 use std::process::exit;
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use clap::Parser;
 use nix::errno::Errno;
@@ -96,6 +97,7 @@ fn main() {
     let mut sink = Sink {
         dump,
         agg: Aggregator::default(),
+        started: Instant::now(),
     };
 
     let mut rx = match ptrace::start(&prog, &args.command, &saved) {
@@ -106,6 +108,7 @@ fn main() {
         }
     };
     let started = Instant::now();
+    let started_at = SystemTime::now();
 
     let (exit_status, mut procs, mut running) = loop {
         match Msg::read(&mut rx) {
@@ -185,7 +188,37 @@ fn main() {
     let mut classes = classify::classify(&records, &ctx);
     filter.apply(&records, &mut classes, &ctx);
 
+    let mut warnings = Vec::new();
+    if !running.is_empty() {
+        warnings.push(format!(
+            "{} background processes still running; their later file access is not in this report",
+            running.len()
+        ));
+    }
+    if gave_up {
+        warnings.push("stopped waiting for background processes".to_string());
+    }
+    if sink.agg.io_uring {
+        warnings
+            .push("the command set up io_uring; file access through it is not seen".to_string());
+    }
+
     let (mut out, shared) = report_writer(args.output.as_deref());
+    if args.json {
+        let run = json::Run {
+            command: &args.command,
+            started_at,
+            duration: elapsed,
+            exit: exit_status,
+            complete: !gave_up,
+            filters: filter.to_json(),
+            execs: &sink.agg.execs,
+            warnings,
+        };
+        let _ = json::write(&mut out, &run, &records, &classes, &ctx);
+        let _ = out.flush();
+        exit(exit_status.code());
+    }
     if shared {
         // Separates the report from whatever the command printed last.
         let _ = writeln!(out);
@@ -248,6 +281,7 @@ fn report_writer(path: Option<&Path>) -> (Box<dyn Write>, bool) {
 struct Sink {
     dump: Option<io::BufWriter<File>>,
     agg: Aggregator,
+    started: Instant,
 }
 
 impl Sink {
@@ -255,7 +289,7 @@ impl Sink {
         if let Some(d) = &mut self.dump {
             let _ = dump::write_event(d, ev);
         }
-        self.agg.add(ev);
+        self.agg.add(ev, self.started.elapsed().as_millis() as u64);
     }
 }
 
