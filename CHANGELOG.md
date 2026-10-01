@@ -1,18 +1,6 @@
 # Changelog
 
-## Unreleased
-
-- Says so when a setuid program ran without its privileges, or a 32-bit program ran untraced.
-- Programs started with `fexecve` show up under EXEC.
-- `--json` lists every process with its parent and exit status, not only the ones that exec'd.
-- `--sort path`, and `-v` shows how many times each path was touched.
-- `--no-seccomp` stops at every syscall instead of using a seccomp filter, for systems where seccomp isn't available.
-- Fewer stops: stat calls on a file descriptor are no longer traced, and events reach the report in batches.
-- The report comes out faster after a large run: `--json` for 100,000 paths went from 6.5 s and 790 MB to 0.4 s and 56 MB.
-
 ## 0.0.1
-
-First release.
 
 - Traces a command and everything it starts with ptrace and a seccomp filter, and reports files read, written, created, renamed, deleted and run, and those looked for and not found or not allowed.
 - Tells a new file from an overwritten one by checking before the syscall runs, and reports a temp file renamed over a file as a write to that file.
