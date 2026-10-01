@@ -4,7 +4,7 @@
 
 use std::ffi::CString;
 use std::fs;
-use std::os::unix::ffi::OsStrExt;
+use std::os::unix::ffi::{OsStrExt, OsStringExt};
 
 use crate::backend::{Call, PathArg};
 
@@ -193,6 +193,10 @@ fn decode_legacy(_: &Tracee, _: i64, _: [u64; 6]) -> Option<Call> {
     None
 }
 
+fn has_dotdot(p: &[u8]) -> bool {
+    p.split(|&b| b == b'/').any(|c| c == b"..")
+}
+
 struct Tracee(i32);
 
 impl Tracee {
@@ -276,12 +280,80 @@ impl Tracee {
         if raw.is_empty() {
             return None;
         }
+        if has_dotdot(&raw)
+            && let Some(arg) = self.through_dotdot(dirfd, &raw)
+        {
+            return Some(arg);
+        }
         let dir = if raw[0] == b'/' {
             None
         } else {
             self.dir_path(dirfd)
         };
         Some(PathArg { dir, raw })
+    }
+
+    /// `link/../x` isn't `x` when `link` is a symlink to another directory,
+    /// so a path with `..` in it is resolved up to its last `..` the way the
+    /// kernel will, and only the rest is left to normalize. `None` if that
+    /// directory can't be opened (it may not exist), and the path stays as
+    /// it was.
+    fn through_dotdot(&self, dirfd: i32, raw: &[u8]) -> Option<PathArg> {
+        let comps: Vec<&[u8]> = raw.split(|&b| b == b'/').collect();
+        let last = comps.iter().rposition(|c| *c == b"..")?;
+        let prefix = comps[..=last].join(&b'/');
+        let rest = comps[last + 1..].join(&b'/');
+        let (base, rel) = self.open_base(dirfd, if prefix.is_empty() { b"/" } else { &prefix })?;
+        let rel = CString::new(rel).ok()?;
+        // SAFETY: valid fd and C string; the new fd is closed below.
+        let fd = unsafe {
+            libc::openat(
+                base,
+                rel.as_ptr(),
+                libc::O_PATH | libc::O_DIRECTORY | libc::O_CLOEXEC,
+            )
+        };
+        // SAFETY: we own base.
+        unsafe { libc::close(base) };
+        if fd < 0 {
+            return None;
+        }
+        let dir = fs::read_link(format!("/proc/self/fd/{fd}"));
+        // SAFETY: we own fd.
+        unsafe { libc::close(fd) };
+        let dir = dir.ok()?.into_os_string().into_vec();
+        Some(if rest.iter().all(|&b| b == b'/') {
+            PathArg {
+                dir: None,
+                raw: dir,
+            }
+        } else {
+            PathArg {
+                dir: Some(dir),
+                raw: rest,
+            }
+        })
+    }
+
+    /// Opens what `raw` is relative to, as the tracee sees it: its cwd or
+    /// dirfd, or its root for an absolute path (which may be a chroot).
+    /// Returns the fd and the part of `raw` to look up from it.
+    fn open_base<'r>(&self, dirfd: i32, raw: &'r [u8]) -> Option<(i32, &'r [u8])> {
+        let (base, rel) = if raw[0] == b'/' {
+            let rel = &raw[raw.iter().position(|&b| b != b'/').unwrap_or(raw.len())..];
+            (
+                format!("/proc/{}/root", self.0),
+                if rel.is_empty() { &b"."[..] } else { rel },
+            )
+        } else if dirfd == CWD {
+            (format!("/proc/{}/cwd", self.0), raw)
+        } else {
+            (format!("/proc/{}/fd/{dirfd}", self.0), raw)
+        };
+        let base = CString::new(base).ok()?;
+        // SAFETY: base is a valid C string; the caller closes the fd.
+        let fd = unsafe { libc::open(base.as_ptr(), libc::O_PATH | libc::O_CLOEXEC) };
+        (fd >= 0).then_some((fd, rel))
     }
 
     fn dir_path(&self, dirfd: i32) -> Option<Vec<u8>> {
@@ -295,28 +367,15 @@ impl Tracee {
             .map(|p| p.into_os_string().as_bytes().to_vec())
     }
 
-    /// Checks whether `raw` exists, as the tracee would see it: relative to
-    /// its cwd or dirfd, and absolute paths relative to its root, which may
-    /// be a chroot. `None` when we can't tell, e.g. no permission to look.
+    /// Checks whether `raw` exists, as the tracee would see it. `None` when
+    /// we can't tell, e.g. no permission to look.
     fn exists(&self, dirfd: i32, raw: &[u8], follow: bool) -> Option<bool> {
-        let (base, rel) = if raw[0] == b'/' {
-            let rel = &raw[raw.iter().position(|&b| b != b'/').unwrap_or(raw.len())..];
-            (
-                format!("/proc/{}/root", self.0),
-                if rel.is_empty() { b"." } else { rel },
-            )
-        } else if dirfd == CWD {
-            (format!("/proc/{}/cwd", self.0), raw)
-        } else {
-            (format!("/proc/{}/fd/{dirfd}", self.0), raw)
-        };
-        let base = CString::new(base).ok()?;
-        let rel = CString::new(rel).ok()?;
-        // SAFETY: base is a valid C string; the fd is closed below.
-        let dfd = unsafe { libc::open(base.as_ptr(), libc::O_PATH | libc::O_CLOEXEC) };
-        if dfd < 0 {
+        let (dfd, rel) = self.open_base(dirfd, raw)?;
+        let Ok(rel) = CString::new(rel) else {
+            // SAFETY: we own dfd.
+            unsafe { libc::close(dfd) };
             return None;
-        }
+        };
         // SAFETY: st is only read after fstatat succeeds.
         let mut st = unsafe { std::mem::zeroed::<libc::stat>() };
         let flags = if follow { 0 } else { libc::AT_SYMLINK_NOFOLLOW };

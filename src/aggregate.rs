@@ -328,9 +328,9 @@ fn absolute(arg: &PathArg) -> Option<Vec<u8>> {
     Some(p)
 }
 
-/// Drops empty and `.` components and applies `..` lexically. That's wrong
-/// for `link/..` when `link` is a symlink to another directory, which is
-/// rare enough that it isn't worth a stat per path.
+/// Drops empty and `.` components and applies `..` lexically. The tracer
+/// has already resolved `..` against the real directory where it could;
+/// what's left here is `..` under a directory that doesn't exist.
 pub fn normalize(p: &[u8]) -> Vec<u8> {
     let mut parts: Vec<&[u8]> = Vec::new();
     for c in p.split(|&b| b == b'/') {

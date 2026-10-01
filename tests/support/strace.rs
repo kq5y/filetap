@@ -99,8 +99,32 @@ fn parse_line(line: &str, cwd: &mut Vec<u8>, out: &mut BTreeSet<Access>) {
             },
             None => cwd.clone(),
         };
-        out.insert((escape(&join(&base, &raw)), result.clone()));
+        out.insert((escape(&normalize(&join(&base, &raw))), result.clone()));
     }
+}
+
+/// filetap reports `a/..` as `a`'s parent, so do the same here. The
+/// scenarios have no symlinked directories, so lexical is right.
+pub fn normalize(p: &[u8]) -> Vec<u8> {
+    let mut parts: Vec<&[u8]> = Vec::new();
+    for c in p.split(|&b| b == b'/') {
+        match c {
+            b"" | b"." => {}
+            b".." => {
+                parts.pop();
+            }
+            c => parts.push(c),
+        }
+    }
+    let mut out = Vec::new();
+    for c in parts {
+        out.push(b'/');
+        out.extend_from_slice(c);
+    }
+    if out.is_empty() {
+        out.push(b'/');
+    }
+    out
 }
 
 fn join(base: &[u8], p: &[u8]) -> Vec<u8> {

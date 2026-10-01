@@ -179,7 +179,6 @@ processes keep working, but what they do afterwards isn't in the report.
 - A debugger or tracer (`gdb`, `strace`) can't run under filetap.
 - Not seen: access through io_uring, or through file descriptors inherited
   from before the command started.
-- `..` in paths is resolved without looking at symlinks.
 - `--json` output has full paths, including your home directory.
 - Each file syscall costs a stop. Reading the whole Python standard library
   (13,000 file syscalls in 1.3 s) takes about twice as long, the same as

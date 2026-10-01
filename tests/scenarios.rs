@@ -51,7 +51,10 @@ fn our_accesses(events: &[Value]) -> BTreeSet<strace::Access> {
                 Some(dir) if !raw.starts_with('/') => format!("{dir}/{raw}"),
                 _ => raw.to_string(),
             };
-            out.insert((abs, outcome.clone()));
+            out.insert((
+                strace::escape(&strace::normalize(abs.as_bytes())),
+                outcome.clone(),
+            ));
         }
     }
     out
