@@ -71,6 +71,8 @@ pub struct Record {
     pub moved_from: Option<usize>,
     pub moved_to: Option<usize>,
     pub pids: Vec<i32>,
+    /// What each of `pids` did to it, as `did::` bits.
+    pub did: Vec<u16>,
     /// Order of first appearance, used for sorting.
     pub first_seen: u64,
     pub first_seen_ms: u64,
@@ -90,6 +92,21 @@ pub struct Aggregator {
     pub execs: Vec<Exec>,
     /// The records the last event was about, for --live.
     pub touched: Vec<usize>,
+    /// Their counts before it, to tell what it did.
+    before: Vec<(Ops, Errors)>,
+}
+
+/// Kinds of access, for telling apart what each process did to a path.
+pub mod did {
+    pub const READ: u16 = 1;
+    pub const WRITE: u16 = 1 << 1;
+    pub const CREATE: u16 = 1 << 2;
+    pub const DELETE: u16 = 1 << 3;
+    pub const MOVE: u16 = 1 << 4;
+    pub const EXEC: u16 = 1 << 5;
+    pub const STAT: u16 = 1 << 6;
+    pub const MISSING: u16 = 1 << 7;
+    pub const DENIED: u16 = 1 << 8;
 }
 
 /// A successful execve.
@@ -103,8 +120,20 @@ impl Aggregator {
     /// `ms` is when the event arrived, counted from the start of the run.
     pub fn add(&mut self, ev: &SysEvent, ms: u64) {
         self.touched.clear();
+        self.before.clear();
         self.seq += 1;
         self.ms = ms;
+        self.apply(ev);
+        for (&i, (o, e)) in self.touched.iter().zip(&self.before) {
+            let r = &mut self.records[i];
+            let bits = changes(o, e, &r.ops, &r.errors);
+            if let Some(k) = r.pids.iter().position(|&p| p == ev.pid) {
+                r.did[k] |= bits;
+            }
+        }
+    }
+
+    fn apply(&mut self, ev: &SysEvent) {
         let ok = ev.result.is_ok();
         match &ev.call {
             Call::Open {
@@ -282,6 +311,7 @@ impl Aggregator {
                     moved_from: None,
                     moved_to: None,
                     pids: Vec::new(),
+                    did: Vec::new(),
                     first_seen: self.seq,
                     first_seen_ms: self.ms,
                     kind_after: None,
@@ -293,10 +323,35 @@ impl Aggregator {
         let r = &mut self.records[i];
         if !r.pids.contains(&pid) {
             r.pids.push(pid);
+            r.did.push(0);
         }
         self.touched.push(i);
+        self.before.push((r.ops.clone(), r.errors.clone()));
         Some(i)
     }
+}
+
+/// What an event did to a record, from how its counts changed.
+fn changes(o: &Ops, e: &Errors, now: &Ops, now_e: &Errors) -> u16 {
+    let mut bits = 0;
+    let mut set = |grew: bool, bit: u16| {
+        if grew {
+            bits |= bit;
+        }
+    };
+    set(now.read > o.read || now.list > o.list, did::READ);
+    set(
+        now.write > o.write || now.attr > o.attr || now.moved_in > o.moved_in,
+        did::WRITE,
+    );
+    set(now.create > o.create, did::CREATE);
+    set(now.delete > o.delete, did::DELETE);
+    set(now.moved_out > o.moved_out, did::MOVE);
+    set(now.exec > o.exec, did::EXEC);
+    set(now.stat > o.stat, did::STAT);
+    set(now_e.missing > e.missing, did::MISSING);
+    set(now_e.denied > e.denied, did::DENIED);
+    bits
 }
 
 impl Record {

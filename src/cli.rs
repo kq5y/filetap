@@ -47,6 +47,10 @@ pub struct Args {
     #[arg(short, long)]
     pub verbose: bool,
 
+    /// List what each process did, one process at a time
+    #[arg(long)]
+    pub by_process: bool,
+
     /// Also print each path to stderr as it's first touched, while the
     /// command runs
     #[arg(long)]

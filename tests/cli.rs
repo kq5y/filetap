@@ -198,3 +198,32 @@ fn report_puts_changes_in_the_right_buckets() {
         }
     }
 }
+
+#[test]
+fn by_process_lists_files_under_the_process_that_touched_them() {
+    let dir = tempdir("by-process");
+    fs::create_dir(dir.join(".git")).unwrap();
+    fs::write(dir.join("in.txt"), "x").unwrap();
+    let out = filetap()
+        .args([
+            "--by-process",
+            "--",
+            "sh",
+            "-c",
+            "cat in.txt > /dev/null; touch out.txt",
+        ])
+        .current_dir(&dir)
+        .output()
+        .unwrap();
+    let report = stderr(&out);
+    let cat = report.find("\ncat[").expect(&report);
+    let touch = report.find("\ntouch[").expect(&report);
+    assert!(
+        report[cat..touch].contains("  READ\n    ./in.txt\n"),
+        "{report}"
+    );
+    assert!(
+        report[touch..].contains("  CREATE\n    ./out.txt\n"),
+        "{report}"
+    );
+}

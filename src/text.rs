@@ -7,7 +7,7 @@ use std::io::{self, Write};
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 
-use crate::aggregate::{Kind, Record};
+use crate::aggregate::{Kind, Record, did};
 use crate::classify::{self, Bucket, Class, Hidden};
 use crate::zone::{Context, parent, under};
 
@@ -53,6 +53,8 @@ pub struct Report<'a> {
     pub color: bool,
     /// --sort path: by path instead of in the order things happened.
     pub by_path: bool,
+    /// --by-process: only what this process did.
+    pub pid: Option<i32>,
 }
 
 const BOLD: &str = "\x1b[1m";
@@ -66,7 +68,7 @@ impl Report<'_> {
         let mut out = Vec::new();
         for &(bucket, title) in SECTIONS {
             let mut entries: Vec<usize> = (0..self.records.len())
-                .filter(|&i| self.classes[i].bucket == bucket && self.visible(i))
+                .filter(|&i| self.bucket(i) == Some(bucket) && self.visible(i))
                 .collect();
             if entries.is_empty() {
                 continue;
@@ -109,6 +111,11 @@ impl Report<'_> {
     }
 
     pub fn write(&self, w: &mut dyn Write) -> io::Result<()> {
+        self.write_sections(w)?;
+        self.summary(w)
+    }
+
+    pub fn write_sections(&self, w: &mut dyn Write) -> io::Result<()> {
         for (bucket, title, lines) in self.sections() {
             let color = match bucket {
                 _ if !self.color => "",
@@ -120,10 +127,10 @@ impl Report<'_> {
             writeln!(w, "{}", self.bold(title))?;
             write_lines(w, &lines, !self.all, color)?;
         }
-        self.summary(w)
+        Ok(())
     }
 
-    fn bold(&self, s: &str) -> String {
+    pub fn bold(&self, s: &str) -> String {
         if self.color {
             format!("{BOLD}{s}{RESET}")
         } else {
@@ -131,7 +138,44 @@ impl Report<'_> {
         }
     }
 
+    /// What happened to a record overall, or with --by-process, what this
+    /// process did to it. `None` if it didn't touch it at all.
+    fn bucket(&self, i: usize) -> Option<Bucket> {
+        let overall = self.classes[i].bucket;
+        let Some(pid) = self.pid else {
+            return Some(overall);
+        };
+        let r = &self.records[i];
+        let d = r.did[r.pids.iter().position(|&p| p == pid)?];
+        let change = did::CREATE | did::DELETE | did::MOVE | did::WRITE;
+        // In the same order as for the whole run.
+        Some(match d {
+            _ if d & change != 0 && overall == Bucket::Temp => Bucket::Temp,
+            _ if d & did::CREATE != 0 => Bucket::Create,
+            _ if d & did::DELETE != 0 => Bucket::Delete,
+            _ if d & did::MOVE != 0 && overall == Bucket::Rename => Bucket::Rename,
+            _ if d & (did::MOVE | did::WRITE) != 0 => Bucket::Write,
+            _ if d & did::EXEC != 0 => Bucket::Exec,
+            _ if d & did::READ != 0 => Bucket::Read,
+            _ if d & did::DENIED != 0 => Bucket::Denied,
+            _ if d & did::STAT != 0 => Bucket::Stat,
+            _ if d & did::MISSING != 0 => Bucket::Missing,
+            _ => Bucket::Stat,
+        })
+    }
+
     fn visible(&self, i: usize) -> bool {
+        // Only stat'ed by this process, or the program it runs, which the
+        // line above its files already says.
+        if self.pid.is_some()
+            && !self.all
+            && matches!(
+                self.bucket(i),
+                Some(Bucket::Stat | Bucket::Temp | Bucket::Exec)
+            )
+        {
+            return false;
+        }
         match self.classes[i].hidden {
             None => true,
             Some(Hidden::Moved | Hidden::Filtered) => false,
@@ -142,29 +186,30 @@ impl Report<'_> {
     fn line(&self, i: usize) -> Line {
         let r = &self.records[i];
         let c = &self.classes[i];
+        let bucket = self.bucket(i).unwrap_or(c.bucket);
         let mut text = self.ctx.display(&r.path);
         if r.kind_after == Some(Kind::Dir) && !text.ends_with('/') {
             text.push('/');
         }
-        if c.bucket == Bucket::Rename
+        if bucket == Bucket::Rename
             && let Some(to) = r.moved_to
         {
             text = format!("{text} -> {}", self.ctx.display(&self.records[to].path));
         }
         let o = &r.ops;
         let mut notes: Vec<String> = Vec::new();
-        if c.credentials && classify::opened(c.bucket) {
+        if c.credentials && classify::opened(bucket) {
             notes.push("credentials".into());
         }
         if c.atomic {
             notes.push("atomic".into());
-        } else if c.bucket == Bucket::Write && o.attr > 0 && o.write + o.create + o.moved_in == 0 {
+        } else if bucket == Bucket::Write && o.attr > 0 && o.write + o.create + o.moved_in == 0 {
             notes.push("attrs".into());
         } else if c.hidden == Some(Hidden::Probe) {
             notes.push("lookup".into());
         }
         if self.verbose {
-            if c.bucket == Bucket::Write && o.read > 0 {
+            if bucket == Bucket::Write && o.read > 0 {
                 notes.push("rw".into());
             }
             let times = o.read
@@ -376,7 +421,7 @@ impl Report<'_> {
         (n >= MISSING_FOLD_MIN && gone).then_some(dir)
     }
 
-    fn summary(&self, w: &mut dyn Write) -> io::Result<()> {
+    pub fn summary(&self, w: &mut dyn Write) -> io::Result<()> {
         let mut shown: HashMap<Bucket, usize> = HashMap::new();
         let mut hidden: HashMap<&str, usize> = HashMap::new();
         let mut credentials = 0;

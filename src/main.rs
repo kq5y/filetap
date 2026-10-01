@@ -10,9 +10,11 @@ mod live;
 mod text;
 mod zone;
 
+use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::fs::File;
 use std::io::{self, Write};
+use std::os::unix::ffi::OsStringExt;
 use std::path::Path;
 use std::process::exit;
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
@@ -241,7 +243,7 @@ fn main() {
             (e.pid, String::from_utf8_lossy(name).into_owned())
         })
         .collect();
-    let report = text::Report {
+    let mut report = text::Report {
         records: &records,
         classes: &classes,
         ctx: &ctx,
@@ -250,6 +252,7 @@ fn main() {
         by_path: args.sort == cli::Sort::Path,
         names,
         color: use_color(args.color, args.output.as_deref()),
+        pid: None,
     };
     let (mut out, shared) = report_writer(args.output.as_deref());
     if args.json {
@@ -299,9 +302,60 @@ fn main() {
             "filetap: the command set up io_uring; file access through it is not in this report"
         );
     }
-    let _ = report.write(&mut out);
+    if args.by_process {
+        let _ = by_process(&mut out, &mut report, &sink.procs, &sink.agg.execs);
+    } else {
+        let _ = report.write(&mut out);
+    }
     let _ = out.flush();
     exit(exit_status.code());
+}
+
+/// Each process that did anything worth showing, under a line that says
+/// which one it is, then the summary for the whole run.
+fn by_process(
+    w: &mut dyn Write,
+    report: &mut text::Report,
+    procs: &BTreeMap<i32, json::Proc>,
+    execs: &[aggregate::Exec],
+) -> io::Result<()> {
+    for (&pid, p) in procs {
+        report.pid = Some(pid);
+        let mut buf = Vec::new();
+        report.write_sections(&mut buf)?;
+        if buf.is_empty() {
+            continue;
+        }
+        let title = match execs.iter().rev().find(|e| e.pid == pid) {
+            Some(e) => {
+                let argv: Vec<OsString> = e
+                    .argv
+                    .iter()
+                    .map(|a| OsString::from_vec(a.clone()))
+                    .collect();
+                format!("{}[{pid}] {}", report.names[&pid], command_line(&argv))
+            }
+            None => {
+                // A fork that never exec'd runs whatever its parent runs.
+                let parent = p.ppid.map_or(String::new(), |pp| {
+                    let name = report.names.get(&pp).map_or("", String::as_str);
+                    format!(", a fork of {name}[{pp}]")
+                });
+                format!("[{pid}]{parent}")
+            }
+        };
+        writeln!(w)?;
+        writeln!(w, "{}", report.bold(&title))?;
+        for line in String::from_utf8_lossy(&buf).lines() {
+            if line.is_empty() {
+                writeln!(w)?;
+            } else {
+                writeln!(w, "  {line}")?;
+            }
+        }
+    }
+    report.pid = None;
+    report.summary(w)
 }
 
 /// Opened only after the command is done, so a command that reads the
@@ -330,7 +384,7 @@ struct Sink {
     live: Option<live::Live>,
     agg: Aggregator,
     warnings: Vec<String>,
-    procs: std::collections::BTreeMap<i32, json::Proc>,
+    procs: BTreeMap<i32, json::Proc>,
     started: Instant,
 }
 
