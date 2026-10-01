@@ -5,6 +5,7 @@ mod cli;
 mod dump;
 mod filter;
 mod json;
+mod jsonl;
 mod launch;
 mod live;
 mod text;
@@ -102,6 +103,12 @@ fn main() {
         live: args
             .live
             .then(|| live::Live::new(args.all, use_color(args.color, None))),
+        // Written as it comes, so it's opened now rather than at the end
+        // like the report.
+        jsonl: args.jsonl.then(|| {
+            let (w, _) = report_writer(args.output.as_deref());
+            jsonl::Stream::new(Box::new(io::BufWriter::new(w)))
+        }),
         agg: Aggregator::default(),
         warnings: Vec::new(),
         procs: Default::default(),
@@ -110,7 +117,7 @@ fn main() {
 
     let cfg = ptrace::Config {
         seccomp: !args.no_seccomp,
-        live: args.live,
+        stream: args.live || args.jsonl,
     };
     let mut rx = match ptrace::start(&prog, &args.command, &saved, cfg) {
         Ok(t) => io::BufReader::with_capacity(1 << 16, t),
@@ -123,17 +130,12 @@ fn main() {
     let started_at = SystemTime::now();
 
     let (exit_status, mut procs, mut running) = loop {
-        match Msg::read(&mut rx) {
-            Ok(Some(Msg::Event(ev))) => sink.event(&ev, &mut ctx, &filter),
-            Ok(Some(Msg::Warning(w))) => sink.warnings.push(w),
-            Ok(Some(Msg::Spawn { parent, child })) => {
-                sink.procs.entry(child).or_default().ppid = Some(parent);
-            }
-            Ok(Some(Msg::ProcExit { pid, exit })) => {
-                sink.procs.entry(pid).or_default().exit = Some(exit)
-            }
+        match sink.next(&mut rx, &mut ctx, &filter) {
             Ok(Some(Msg::Started { pid })) => {
                 sink.procs.entry(pid).or_default();
+                if let Some(s) = &mut sink.jsonl {
+                    s.spawn(0, pid, None);
+                }
                 ROOT.store(pid, Ordering::SeqCst);
                 let sig = PENDING.swap(0, Ordering::SeqCst);
                 if sig != 0 {
@@ -154,8 +156,14 @@ fn main() {
                 exit,
                 procs,
                 running,
-            })) => break (exit, procs, running),
-            Ok(Some(Msg::Done { .. })) | Ok(None) => {
+            })) => {
+                let ms = sink.ms();
+                if let Some(s) = &mut sink.jsonl {
+                    s.exit(ms, ROOT.load(Ordering::SeqCst), exit);
+                }
+                break (exit, procs, running);
+            }
+            Ok(Some(_)) | Ok(None) => {
                 eprintln!("filetap: tracer exited unexpectedly");
                 exit(125);
             }
@@ -178,19 +186,11 @@ fn main() {
         // Only a Ctrl-C after the command itself is done means "stop waiting".
         INTERRUPTED.store(false, Ordering::SeqCst);
         loop {
-            match Msg::read(&mut rx) {
+            match sink.next(&mut rx, &mut ctx, &filter) {
                 Ok(Some(Msg::Done { procs: n })) => {
                     procs = n;
                     running.clear();
                     break;
-                }
-                Ok(Some(Msg::Event(ev))) => sink.event(&ev, &mut ctx, &filter),
-                Ok(Some(Msg::Warning(w))) => sink.warnings.push(w),
-                Ok(Some(Msg::Spawn { parent, child })) => {
-                    sink.procs.entry(child).or_default().ppid = Some(parent);
-                }
-                Ok(Some(Msg::ProcExit { pid, exit })) => {
-                    sink.procs.entry(pid).or_default().exit = Some(exit)
                 }
                 Ok(Some(_)) => {}
                 Err(e)
@@ -207,6 +207,19 @@ fn main() {
 
     if let Some(d) = &mut sink.dump {
         let _ = d.flush();
+    }
+    if let Some(s) = &mut sink.jsonl {
+        if !running.is_empty() {
+            s.warning(
+                sink.started.elapsed().as_millis() as u64,
+                &format!(
+                    "{} background processes still running; their later file access is not in this stream",
+                    running.len()
+                ),
+            );
+        }
+        s.flush();
+        exit(exit_status.code());
     }
 
     let mut records = sink.agg.records;
@@ -382,6 +395,7 @@ fn report_writer(path: Option<&Path>) -> (Box<dyn Write>, bool) {
 struct Sink {
     dump: Option<io::BufWriter<File>>,
     live: Option<live::Live>,
+    jsonl: Option<jsonl::Stream>,
     agg: Aggregator,
     warnings: Vec<String>,
     procs: BTreeMap<i32, json::Proc>,
@@ -389,11 +403,62 @@ struct Sink {
 }
 
 impl Sink {
-    fn event(&mut self, ev: &SysEvent, ctx: &mut zone::Context, filter: &filter::Filter) {
+    /// The next message the caller has to act on. Events and what else
+    /// only goes into the report are taken care of here.
+    fn next(
+        &mut self,
+        rx: &mut io::BufReader<File>,
+        ctx: &mut zone::Context,
+        filter: &filter::Filter,
+    ) -> io::Result<Option<Msg>> {
+        loop {
+            if rx.buffer().is_empty()
+                && let Some(s) = &mut self.jsonl
+            {
+                // About to wait for the tracer, so whoever reads the stream
+                // can have what there is.
+                s.flush();
+            }
+            let msg = Msg::read(rx)?;
+            let ms = self.ms();
+            match msg {
+                Some(Msg::Event(ev)) => self.event(&ev, ms, ctx, filter),
+                Some(Msg::Warning(w)) => {
+                    if let Some(s) = &mut self.jsonl {
+                        s.warning(ms, &w);
+                    }
+                    self.warnings.push(w);
+                }
+                Some(Msg::Spawn { parent, child }) => {
+                    if let Some(s) = &mut self.jsonl {
+                        s.spawn(ms, child, Some(parent));
+                    }
+                    self.procs.entry(child).or_default().ppid = Some(parent);
+                }
+                Some(Msg::ProcExit { pid, exit }) => {
+                    if let Some(s) = &mut self.jsonl {
+                        s.exit(ms, pid, exit);
+                    }
+                    self.procs.entry(pid).or_default().exit = Some(exit);
+                }
+                other => return Ok(other),
+            }
+        }
+    }
+
+    fn ms(&self) -> u64 {
+        self.started.elapsed().as_millis() as u64
+    }
+
+    fn event(&mut self, ev: &SysEvent, ms: u64, ctx: &mut zone::Context, filter: &filter::Filter) {
         if let Some(d) = &mut self.dump {
             let _ = dump::write_event(d, ev);
         }
-        self.agg.add(ev, self.started.elapsed().as_millis() as u64);
+        if let Some(s) = &mut self.jsonl {
+            s.event(ev, ms, ctx, filter);
+            return;
+        }
+        self.agg.add(ev, ms);
         if let Some(l) = &mut self.live {
             l.update(&self.agg.records, &self.agg.touched, ctx, filter);
         }

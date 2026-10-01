@@ -135,7 +135,7 @@ fn detach_stdio() {
 struct State {
     tx: Option<BufWriter<File>>,
     seccomp: bool,
-    /// Flush whenever there's nothing else to do (--live).
+    /// Flush whenever there's nothing else to do (--live, --jsonl).
     eager: bool,
     root: i32,
     root_resumed: bool,
@@ -156,7 +156,7 @@ impl State {
         State {
             tx: Some(BufWriter::with_capacity(1 << 16, tx)),
             seccomp: cfg.seccomp,
-            eager: cfg.live,
+            eager: cfg.stream,
             root,
             root_resumed: false,
             root_execed: false,
@@ -169,7 +169,7 @@ impl State {
         }
     }
 
-    /// Buffered: without --live the front only needs events by the time the
+    /// Buffered: unless streaming, the front only needs events by the time the
     /// root process exits, and that message is flushed right away.
     fn send(&mut self, msg: &Msg) {
         if let Some(tx) = &mut self.tx {

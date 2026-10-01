@@ -75,6 +75,7 @@ filetap [OPTIONS] -- <COMMAND> [ARGS...]
 | `--live` | Also print each path to stderr as it's first touched (`<---` read, `--->` written, ` >>>` run, ` ?--` not found) |
 | `--sort path` | Sort by path instead of by when each path was first touched |
 | `--json` | Everything, including what's hidden and why |
+| `--jsonl` | Instead of the report, one JSON line per file access as it happens |
 | `-o FILE` | Write the report to FILE (default stderr, `-` for stdout) |
 | `--wait` | Also wait for processes the command left running |
 | `--root DIR` | Project root (default: git toplevel, else the cwd) |

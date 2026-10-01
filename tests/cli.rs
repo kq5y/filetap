@@ -227,3 +227,26 @@ fn by_process_lists_files_under_the_process_that_touched_them() {
         "{report}"
     );
 }
+
+#[test]
+fn jsonl_writes_one_json_object_per_line() {
+    let dir = tempdir("jsonl");
+    let out = filetap()
+        .args(["--jsonl", "-o", "-", "--", "sh", "-c", "echo x > new.txt"])
+        .current_dir(&dir)
+        .output()
+        .unwrap();
+    let lines: Vec<serde_json::Value> = String::from_utf8(out.stdout)
+        .unwrap()
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    let new = dir.join("new.txt");
+    assert!(
+        lines
+            .iter()
+            .any(|l| l["op"] == "create" && l["path"] == new.to_str().unwrap()),
+        "{lines:#?}"
+    );
+    assert_eq!(lines.last().unwrap()["op"], "exit");
+}

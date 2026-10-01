@@ -379,7 +379,7 @@ impl Record {
 
 /// Paths relative to a directory we couldn't read, or to something that
 /// isn't a directory at all (`pipe:[123]`), are dropped.
-fn absolute(arg: &PathArg) -> Option<Vec<u8>> {
+pub fn absolute(arg: &PathArg) -> Option<Vec<u8>> {
     if arg.raw.first() == Some(&b'/') {
         return Some(arg.raw.clone());
     }

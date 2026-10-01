@@ -77,8 +77,9 @@ impl SavedSignals {
 pub struct Config {
     /// Off for --no-seccomp: stop at every syscall.
     pub seccomp: bool,
-    /// Send events as they happen instead of in batches, for --live.
-    pub live: bool,
+    /// Send events as they happen instead of in batches, for --live and
+    /// --jsonl.
+    pub stream: bool,
 }
 
 /// Forks the tracer, which in turn starts `prog` with `argv` under ptrace.

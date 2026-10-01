@@ -307,7 +307,7 @@ fn nonzero<S: Serializer>(s: S, counts: &[(&str, u32)]) -> Result<S::Ok, S::Erro
     m.end()
 }
 
-fn lossy(b: &[u8]) -> Cow<'_, str> {
+pub fn lossy(b: &[u8]) -> Cow<'_, str> {
     String::from_utf8_lossy(b)
 }
 
@@ -334,7 +334,7 @@ fn kind_name(k: Kind) -> &'static str {
     }
 }
 
-fn base64(b: &[u8]) -> String {
+pub fn base64(b: &[u8]) -> String {
     const ABC: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::new();
     for chunk in b.chunks(3) {

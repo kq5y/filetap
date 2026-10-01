@@ -67,6 +67,11 @@ pub struct Args {
     #[arg(long)]
     pub json: bool,
 
+    /// Instead of the report, write each file access as a JSON line as it
+    /// happens
+    #[arg(long, conflicts_with_all = ["json", "by_process", "live"])]
+    pub jsonl: bool,
+
     /// Write the report to FILE instead of stderr ("-" for stdout)
     #[arg(short, long, value_name = "FILE")]
     pub output: Option<PathBuf>,
