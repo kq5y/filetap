@@ -4,7 +4,7 @@
 use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::fs;
-use std::os::unix::ffi::OsStrExt;
+use std::os::unix::ffi::{OsStrExt, OsStringExt};
 
 use crate::backend::{Call, PathArg, SysEvent};
 
@@ -76,6 +76,8 @@ pub struct Record {
     pub first_seen_ms: u64,
     /// Filled in by `enrich` after the run; `None` if it doesn't exist.
     pub kind_after: Option<Kind>,
+    /// With symlinks resolved, also from `enrich`, and only when asked for.
+    pub resolved: Option<Vec<u8>>,
 }
 
 #[derive(Default)]
@@ -280,6 +282,7 @@ impl Aggregator {
                     first_seen: self.seq,
                     first_seen_ms: self.ms,
                     kind_after: None,
+                    resolved: None,
                 });
                 i
             }
@@ -356,18 +359,39 @@ pub fn normalize(p: &[u8]) -> Vec<u8> {
 /// Looks at every path once the command is done. A stat each, spread over
 /// a few threads: with a hundred thousand paths this is most of the time
 /// between the command exiting and the report.
-pub fn enrich(records: &mut [Record]) {
+pub fn enrich(records: &mut [Record], resolve: bool) {
     let threads = std::thread::available_parallelism().map_or(1, |n| n.get().min(8));
     let chunk = records.len().div_ceil(threads).max(1);
     std::thread::scope(|s| {
         for part in records.chunks_mut(chunk) {
-            s.spawn(|| {
+            s.spawn(move || {
+                // Paths come mostly a directory at a time, so resolving each
+                // directory once leaves only the symlinks themselves.
+                let mut dirs: HashMap<Vec<u8>, Option<Vec<u8>>> = HashMap::new();
                 for r in part {
                     r.kind_after = kind(&r.path);
+                    if !resolve || r.kind_after.is_none() {
+                        continue;
+                    }
+                    r.resolved = match r.path.iter().rposition(|&b| b == b'/') {
+                        Some(i) if i > 0 && r.kind_after != Some(Kind::Symlink) => {
+                            let (dir, name) = r.path.split_at(i);
+                            dirs.entry(dir.to_vec())
+                                .or_insert_with(|| canonicalize(dir))
+                                .as_ref()
+                                .map(|d| [d.as_slice(), name].concat())
+                        }
+                        _ => canonicalize(&r.path),
+                    };
                 }
             });
         }
     });
+}
+
+fn canonicalize(p: &[u8]) -> Option<Vec<u8>> {
+    let p = fs::canonicalize(OsStr::from_bytes(p)).ok()?;
+    Some(p.into_os_string().into_vec())
 }
 
 fn kind(path: &[u8]) -> Option<Kind> {

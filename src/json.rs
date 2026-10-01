@@ -2,7 +2,7 @@
 //! Fields can be added within `filetap.report/v1`; removing or changing
 //! one means a v2.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::io::{self, Write};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -44,6 +44,7 @@ pub fn write(
     records: &[Record],
     classes: &[Class],
     ctx: &Context,
+    folded: &HashMap<usize, Option<String>>,
 ) -> io::Result<()> {
     let mut hidden_counts: BTreeMap<&str, usize> = BTreeMap::new();
     let mut summary: BTreeMap<&str, usize> = BTreeMap::new();
@@ -96,6 +97,7 @@ pub fn write(
             records,
             classes,
             ctx,
+            folded,
         },
         hidden_counts,
         summary,
@@ -168,6 +170,8 @@ struct Files<'a> {
     records: &'a [Record],
     classes: &'a [Class],
     ctx: &'a Context,
+    /// From the text report: what it didn't give a line of its own.
+    folded: &'a HashMap<usize, Option<String>>,
 }
 
 impl Serialize for Files<'_> {
@@ -177,8 +181,9 @@ impl Serialize for Files<'_> {
             records
                 .iter()
                 .zip(self.classes)
-                .filter(|(_, c)| c.hidden != Some(Hidden::Filtered))
-                .map(|(r, c)| {
+                .enumerate()
+                .filter(|(_, (_, c))| c.hidden != Some(Hidden::Filtered))
+                .map(|(i, (r, c))| {
                     let zone = self.ctx.zone(&r.path);
                     let path_of = |i: Option<usize>| i.map(|i| lossy(&records[i].path));
                     File {
@@ -187,14 +192,18 @@ impl Serialize for Files<'_> {
                             .is_err()
                             .then(|| base64(&r.path)),
                         display: self.ctx.display(&r.path),
+                        resolved: r.resolved.as_deref().map(lossy),
                         zone: zone.name(),
                         kind: r.kind_after.map(kind_name),
                         bucket: c.bucket.name(),
                         visibility: if c.hidden.is_some() {
                             "hidden"
+                        } else if self.folded.contains_key(&i) {
+                            "folded"
                         } else {
                             "shown"
                         },
+                        folded_into: self.folded.get(&i).cloned().flatten(),
                         hidden_reason: c.hidden.map(|h| hidden_reason(h, zone)),
                         ops: Ops(&r.ops),
                         errors: Errors(&r.errors),
@@ -226,10 +235,15 @@ struct File<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     path_b64: Option<String>,
     display: String,
+    resolved: Option<Cow<'a, str>>,
     zone: &'static str,
     kind: Option<&'static str>,
     bucket: &'static str,
     visibility: &'static str,
+    /// The text line it went into; absent when it was cut off by the
+    /// line limit instead.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    folded_into: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     hidden_reason: Option<&'static str>,
     ops: Ops<'a>,

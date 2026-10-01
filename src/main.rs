@@ -200,7 +200,7 @@ fn main() {
     }
 
     let mut records = sink.agg.records;
-    aggregate::enrich(&mut records);
+    aggregate::enrich(&mut records, args.json);
     for r in &records {
         if r.ops.exec > 0 {
             ctx.exec_seen(&r.path);
@@ -224,6 +224,25 @@ fn main() {
             .push("the command set up io_uring; file access through it is not seen".to_string());
     }
 
+    let names = sink
+        .agg
+        .execs
+        .iter()
+        .map(|e| {
+            let name = e.path.rsplit(|&b| b == b'/').next().unwrap_or(&e.path);
+            (e.pid, String::from_utf8_lossy(name).into_owned())
+        })
+        .collect();
+    let report = text::Report {
+        records: &records,
+        classes: &classes,
+        ctx: &ctx,
+        all: args.all,
+        verbose: args.verbose,
+        by_path: args.sort == cli::Sort::Path,
+        names,
+        color: use_color(args.color, args.output.as_deref()),
+    };
     let (mut out, shared) = report_writer(args.output.as_deref());
     if args.json {
         let run = json::Run {
@@ -238,7 +257,7 @@ fn main() {
             procs: &sink.procs,
             warnings,
         };
-        let _ = json::write(&mut out, &run, &records, &classes, &ctx);
+        let _ = json::write(&mut out, &run, &records, &classes, &ctx, &report.folded());
         let _ = out.flush();
         exit(exit_status.code());
     }
@@ -272,25 +291,6 @@ fn main() {
             "filetap: the command set up io_uring; file access through it is not in this report"
         );
     }
-    let names = sink
-        .agg
-        .execs
-        .iter()
-        .map(|e| {
-            let name = e.path.rsplit(|&b| b == b'/').next().unwrap_or(&e.path);
-            (e.pid, String::from_utf8_lossy(name).into_owned())
-        })
-        .collect();
-    let report = text::Report {
-        records: &records,
-        classes: &classes,
-        ctx: &ctx,
-        all: args.all,
-        verbose: args.verbose,
-        by_path: args.sort == cli::Sort::Path,
-        names,
-        color: use_color(args.color, args.output.as_deref()),
-    };
     let _ = report.write(&mut out);
     let _ = out.flush();
     exit(exit_status.code());

@@ -36,6 +36,8 @@ const SECTIONS: &[(Bucket, &str)] = &[
 struct Line {
     text: String,
     note: String,
+    /// The records it stands for.
+    members: Vec<usize>,
 }
 
 pub struct Report<'a> {
@@ -59,7 +61,9 @@ const RED: &str = "\x1b[31m";
 const RESET: &str = "\x1b[0m";
 
 impl Report<'_> {
-    pub fn write(&self, w: &mut dyn Write) -> io::Result<()> {
+    /// Each section's lines, and which records each line stands for.
+    fn sections(&self) -> Vec<(Bucket, &'static str, Vec<Line>)> {
+        let mut out = Vec::new();
         for &(bucket, title) in SECTIONS {
             let mut entries: Vec<usize> = (0..self.records.len())
                 .filter(|&i| self.classes[i].bucket == bucket && self.visible(i))
@@ -80,6 +84,32 @@ impl Report<'_> {
             } else {
                 self.fold(bucket, &entries)
             };
+            out.push((bucket, title, lines));
+        }
+        out
+    }
+
+    /// Records that the text report doesn't list on a line of their own:
+    /// folded into a directory or a lookup line, or past the end of a long
+    /// section. The value is the line they went into, if any.
+    pub fn folded(&self) -> HashMap<usize, Option<String>> {
+        let mut out = HashMap::new();
+        for (_, _, lines) in self.sections() {
+            for (k, line) in lines.iter().enumerate() {
+                let cut = !self.all && k >= MAX_LINES;
+                if cut || line.members.len() > 1 {
+                    let into = (!cut).then(|| line.text.clone());
+                    for &i in &line.members {
+                        out.insert(i, into.clone());
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    pub fn write(&self, w: &mut dyn Write) -> io::Result<()> {
+        for (bucket, title, lines) in self.sections() {
             let color = match bucket {
                 _ if !self.color => "",
                 Bucket::Missing => YELLOW,
@@ -177,6 +207,7 @@ impl Report<'_> {
             } else {
                 format!("({})", notes.join("; "))
             },
+            members: vec![i],
         }
     }
 
@@ -259,7 +290,7 @@ impl Report<'_> {
             .map(|key| {
                 let members = &groups[&key];
                 let n = members.len();
-                match key {
+                let mut line = match key {
                     Key::Path(_) => self.line(members[0]),
                     Key::Walk(_) | Key::Name(..) if n == 1 => self.line(members[0]),
                     Key::Walk(_) => {
@@ -287,9 +318,12 @@ impl Report<'_> {
                             } else {
                                 format!("({} {})", count(n), if n == 1 { "file" } else { "files" })
                             },
+                            members: Vec::new(),
                         }
                     }
-                }
+                };
+                line.members = members.clone();
+                line
             })
             .collect()
     }
@@ -437,7 +471,7 @@ fn write_lines(w: &mut dyn Write, lines: &[Line], limit: bool, color: &str) -> i
     if shown.len() < lines.len() {
         writeln!(
             w,
-            "  ... and {} more (use -a to see all)",
+            "  ... and {} more (use -a or --json to see all)",
             count(lines.len() - shown.len())
         )?;
     }
