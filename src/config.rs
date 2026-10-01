@@ -26,7 +26,9 @@ pub fn load(root: &[u8]) -> Result<Config, String> {
         Err(e) => return Err(format!("{}: {e}", path.display())),
     };
     toml::from_str(&text).map_err(|e| {
-        let line = e.span().map_or(1, |s| text[..s.start].matches('\n').count() + 1);
+        let line = e
+            .span()
+            .map_or(1, |s| text[..s.start].matches('\n').count() + 1);
         format!("{}:{line}: {}", path.display(), e.message())
     })
 }
