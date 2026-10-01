@@ -148,6 +148,10 @@ Left out unless you ask with `-a`, and counted in the summary:
 Changes are always listed, wherever they are. Directories with many entries
 fold into one line, and so does a name looked up in many directories.
 
+Files that exist to hold a key or a token (`~/.ssh/id_*`,
+`~/.aws/credentials`, `~/.netrc`, `.env`) are marked `(credentials)` when
+opened, and never folded.
+
 ## Background processes
 
 If the command leaves processes running (a daemon, a build server), filetap

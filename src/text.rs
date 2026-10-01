@@ -8,7 +8,7 @@ use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 
 use crate::aggregate::{Kind, Record};
-use crate::classify::{Bucket, Class, Hidden};
+use crate::classify::{self, Bucket, Class, Hidden};
 use crate::zone::{Context, parent, under};
 
 /// Entries under one directory before it folds into a single line.
@@ -153,6 +153,9 @@ impl Report<'_> {
         }
         let o = &r.ops;
         let mut notes: Vec<String> = Vec::new();
+        if c.credentials && classify::opened(c.bucket) {
+            notes.push("credentials".into());
+        }
         if c.atomic {
             notes.push("atomic".into());
         } else if c.bucket == Bucket::Write && o.attr > 0 && o.write + o.create + o.moved_in == 0 {
@@ -376,9 +379,15 @@ impl Report<'_> {
     fn summary(&self, w: &mut dyn Write) -> io::Result<()> {
         let mut shown: HashMap<Bucket, usize> = HashMap::new();
         let mut hidden: HashMap<&str, usize> = HashMap::new();
+        let mut credentials = 0;
         for c in self.classes {
             match c.hidden {
-                None => *shown.entry(c.bucket).or_default() += 1,
+                None => {
+                    *shown.entry(c.bucket).or_default() += 1;
+                    if c.credentials && classify::opened(c.bucket) {
+                        credentials += 1;
+                    }
+                }
                 Some(h) => {
                     let what = match h {
                         Hidden::Zone => "system/toolchain",
@@ -412,6 +421,11 @@ impl Report<'_> {
             0 => {}
             1 => parts.push("1 program run".into()),
             e => parts.push(format!("{} programs run", count(e))),
+        }
+        match credentials {
+            0 => {}
+            1 => parts.push("1 credential file opened".into()),
+            n => parts.push(format!("{} credential files opened", count(n))),
         }
         let changed: usize = [
             Bucket::Create,

@@ -73,8 +73,10 @@ pub struct Class {
     pub atomic: bool,
     /// Failed lookups that ended up finding this path, in order.
     pub lookups_before: Vec<usize>,
-    /// Matched --show: never folded.
+    /// Matched --show, or a credential file that was opened: never folded.
     pub pinned: bool,
+    /// One of the files that exist to hold a secret.
+    pub credentials: bool,
 }
 
 const CODE_EXTS: &[&[u8]] = &[
@@ -88,12 +90,14 @@ pub fn classify(records: &[Record], ctx: &Context) -> Vec<Class> {
         .map(|r| {
             let bucket = bucket(r);
             let zone = ctx.zone(&r.path);
+            let credentials = credentials(&r.path, ctx.home.as_deref());
             Class {
                 bucket,
                 hidden: hidden(r, bucket, zone),
                 atomic: false,
                 lookups_before: Vec::new(),
-                pinned: false,
+                pinned: credentials && opened(bucket),
+                credentials,
             }
         })
         .collect();
@@ -186,6 +190,59 @@ fn hidden(r: &Record, bucket: Bucket, zone: Zone) -> Option<Hidden> {
         }
         _ => None,
     }
+}
+
+/// Read, written, run or replaced, as opposed to only looked for.
+pub fn opened(b: Bucket) -> bool {
+    !matches!(b, Bucket::Missing | Bucket::Denied | Bucket::Stat)
+}
+
+/// Files that are there to hold a key or a token. Reading one is often
+/// fine, but it's the first thing to look for after running something you
+/// don't trust.
+pub fn credentials(p: &[u8], home: Option<&[u8]>) -> bool {
+    let name = basename(p);
+    if name == b".env" || (name.starts_with(b".env.") && !env_template(name)) {
+        return true;
+    }
+    let Some(rest) = home.and_then(|h| p.strip_prefix(h)) else {
+        return false;
+    };
+    const FILES: &[&[u8]] = &[
+        b"/.aws/credentials",
+        b"/.netrc",
+        b"/.git-credentials",
+        b"/.pgpass",
+        b"/.pypirc",
+        b"/.docker/config.json",
+        b"/.kube/config",
+        b"/.config/gh/hosts.yml",
+        b"/.cargo/credentials",
+        b"/.cargo/credentials.toml",
+    ];
+    if FILES.contains(&rest) || rest.starts_with(b"/.gnupg/private-keys-v1.d/") {
+        return true;
+    }
+    // Keys, not the files ssh reads on every connection.
+    rest.strip_prefix(b"/.ssh/").is_some_and(|f| {
+        !f.contains(&b'/')
+            && !f.ends_with(b".pub")
+            && !f.starts_with(b"known_hosts")
+            && !matches!(f, b"config" | b"authorized_keys" | b"environment")
+    })
+}
+
+/// `.env.example` and the like are checked in on purpose.
+fn env_template(name: &[u8]) -> bool {
+    [
+        &b"example"[..],
+        b"sample",
+        b"template",
+        b"dist",
+        b"defaults",
+    ]
+    .iter()
+    .any(|t| name.ends_with(t))
 }
 
 /// Files whose "writes" don't change anything on disk.
@@ -426,6 +483,21 @@ mod tests {
         assert_eq!(out[0].2, Some(Hidden::Probe));
         assert_eq!(out[2].2, Some(Hidden::Probe));
         assert_eq!(out[4], ("/p/.env.local".into(), Bucket::Missing, None));
+    }
+
+    #[test]
+    fn keys_and_tokens_are_credentials_but_ssh_config_is_not() {
+        let home = Some(&b"/h"[..]);
+        for p in ["/h/.ssh/id_ed25519", "/h/.aws/credentials", "/p/.env.local"] {
+            assert!(credentials(p.as_bytes(), home), "{p}");
+        }
+        for p in [
+            "/h/.ssh/known_hosts",
+            "/h/.ssh/id_ed25519.pub",
+            "/p/.env.example",
+        ] {
+            assert!(!credentials(p.as_bytes(), home), "{p}");
+        }
     }
 
     #[test]

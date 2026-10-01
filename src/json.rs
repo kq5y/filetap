@@ -216,6 +216,7 @@ impl Serialize for Files<'_> {
                         moved_from: path_of(r.moved_from),
                         moved_to: path_of(r.moved_to),
                         atomic: c.atomic,
+                        credentials: c.credentials,
                         lookups_before: c
                             .lookups_before
                             .iter()
@@ -253,6 +254,7 @@ struct File<'a> {
     moved_from: Option<Cow<'a, str>>,
     moved_to: Option<Cow<'a, str>>,
     atomic: bool,
+    credentials: bool,
     lookups_before: Vec<Cow<'a, str>>,
     pids: &'a [i32],
     first_seen_ms: u64,
