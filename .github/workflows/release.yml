@@ -3,12 +3,23 @@ name: Release
 on:
   push:
     tags: ["v*"]
+  # Rewrites the notes of an existing release from CHANGELOG.md on the
+  # default branch, for when they need fixing after the fact.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag, like v0.0.1
+        required: true
 
 permissions:
   contents: write
 
+env:
+  TAG: ${{ inputs.tag || github.ref_name }}
+
 jobs:
   build:
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     strategy:
       matrix:
@@ -40,9 +51,22 @@ jobs:
           merge-multiple: true
       - name: Release notes from CHANGELOG.md
         run: |
-          awk -v v="${GITHUB_REF_NAME#v}" '/^## /{if (p) exit; p = ($2 == v); next} p' CHANGELOG.md > notes.md
+          awk -v v="${TAG#v}" '/^## /{if (p) exit; p = ($2 == v); next} p' CHANGELOG.md > notes.md
           test -s notes.md
       - run: sha256sum filetap_linux_*.tar.gz > SHA256SUMS
-      - run: gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --notes-file notes.md filetap_linux_*.tar.gz SHA256SUMS
+      - run: gh release create "$TAG" --title "$TAG" --notes-file notes.md filetap_linux_*.tar.gz SHA256SUMS
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+  notes:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Release notes from CHANGELOG.md
+        run: |
+          awk -v v="${TAG#v}" '/^## /{if (p) exit; p = ($2 == v); next} p' CHANGELOG.md > notes.md
+          test -s notes.md
+      - run: gh release edit "$TAG" --notes-file notes.md
         env:
           GH_TOKEN: ${{ github.token }}
