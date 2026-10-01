@@ -176,7 +176,7 @@ fn bucket(r: &Record) -> Bucket {
     Bucket::Stat
 }
 
-fn hidden(r: &Record, bucket: Bucket, zone: Zone) -> Option<Hidden> {
+pub fn hidden(r: &Record, bucket: Bucket, zone: Zone) -> Option<Hidden> {
     match bucket {
         Bucket::Temp => Some(Hidden::Temp),
         Bucket::Stat => Some(Hidden::Stat),

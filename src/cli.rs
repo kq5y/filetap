@@ -47,6 +47,11 @@ pub struct Args {
     #[arg(short, long)]
     pub verbose: bool,
 
+    /// Also print each path to stderr as it's first touched, while the
+    /// command runs
+    #[arg(long)]
+    pub live: bool,
+
     #[arg(long, value_name = "WHEN", default_value = "auto")]
     pub color: Color,
 

@@ -74,11 +74,18 @@ impl SavedSignals {
     }
 }
 
+pub struct Config {
+    /// Off for --no-seccomp: stop at every syscall.
+    pub seccomp: bool,
+    /// Send events as they happen instead of in batches, for --live.
+    pub live: bool,
+}
+
 /// Forks the tracer, which in turn starts `prog` with `argv` under ptrace.
 /// Returns the read end of the pipe the tracer reports on.
 ///
 /// Must be called while the process is still single-threaded.
-pub fn start(prog: &Path, argv: &[OsString], saved: &SavedSignals, seccomp: bool) -> Result<File> {
+pub fn start(prog: &Path, argv: &[OsString], saved: &SavedSignals, cfg: Config) -> Result<File> {
     let prog = CString::new(prog.as_os_str().as_bytes()).context("command contains a NUL byte")?;
     let argv = argv
         .iter()
@@ -91,7 +98,7 @@ pub fn start(prog: &Path, argv: &[OsString], saved: &SavedSignals, seccomp: bool
     match unsafe { fork() }.context("fork")? {
         ForkResult::Child => {
             drop(rx);
-            tracer::run(&prog, &argv, saved, File::from(tx), seccomp)
+            tracer::run(&prog, &argv, saved, File::from(tx), cfg)
         }
         ForkResult::Parent { .. } => Ok(File::from(rx)),
     }

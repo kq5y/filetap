@@ -13,13 +13,13 @@ use nix::sys::ptrace::{self, Options};
 use nix::sys::signal::{Signal, kill, raise};
 use nix::unistd::{ForkResult, Pid, execv, fork, pipe2};
 
-use super::{Msg, SavedSignals, decode, seccomp};
+use super::{Config, Msg, SavedSignals, decode, seccomp};
 use crate::backend::{Call, Exit, SysEvent};
 
-/// With `seccomp` off, the command stops at every syscall instead of only at
-/// the ones we decode: slower, but works where seccomp filters can't be
-/// installed.
-pub fn run(prog: &CStr, argv: &[CString], saved: &SavedSignals, tx: File, seccomp: bool) -> ! {
+/// With `cfg.seccomp` off, the command stops at every syscall instead of
+/// only at the ones we decode: slower, but works where seccomp filters can't
+/// be installed.
+pub fn run(prog: &CStr, argv: &[CString], saved: &SavedSignals, tx: File, cfg: Config) -> ! {
     // The tracer must survive anything aimed at the command's process group:
     // Ctrl-C, Ctrl-Z, hangups. If it stopped, every tracee would stall in its
     // next ptrace-stop.
@@ -37,8 +37,8 @@ pub fn run(prog: &CStr, argv: &[CString], saved: &SavedSignals, tx: File, seccom
         unsafe { libc::signal(sig, libc::SIG_IGN) };
     }
 
-    let mut t = match launch(prog, argv, saved, seccomp) {
-        Ok((root, exec_err)) => State::new(root, exec_err, tx, seccomp),
+    let mut t = match launch(prog, argv, saved, cfg.seccomp) {
+        Ok((root, exec_err)) => State::new(root, exec_err, tx, cfg),
         Err(e) => {
             let _ = (&tx).write_all(&Msg::Failed(e).encode());
             process::exit(1);
@@ -135,6 +135,8 @@ fn detach_stdio() {
 struct State {
     tx: Option<BufWriter<File>>,
     seccomp: bool,
+    /// Flush whenever there's nothing else to do (--live).
+    eager: bool,
     root: i32,
     root_resumed: bool,
     root_execed: bool,
@@ -150,10 +152,11 @@ struct State {
 }
 
 impl State {
-    fn new(root: i32, exec_err: File, tx: File, seccomp: bool) -> State {
+    fn new(root: i32, exec_err: File, tx: File, cfg: Config) -> State {
         State {
             tx: Some(BufWriter::with_capacity(1 << 16, tx)),
-            seccomp,
+            seccomp: cfg.seccomp,
+            eager: cfg.live,
             root,
             root_resumed: false,
             root_execed: false,
@@ -166,8 +169,8 @@ impl State {
         }
     }
 
-    /// Buffered: the front only needs events by the time the root process
-    /// exits, and that message is flushed right away.
+    /// Buffered: without --live the front only needs events by the time the
+    /// root process exits, and that message is flushed right away.
     fn send(&mut self, msg: &Msg) {
         if let Some(tx) = &mut self.tx {
             // The front is gone once it has printed the report; keep tracing
@@ -187,8 +190,20 @@ impl State {
     }
 
     fn trace(&mut self) {
+        let flags = if self.eager {
+            libc::__WALL | libc::WNOHANG
+        } else {
+            libc::__WALL
+        };
         loop {
-            match wait(-1, libc::__WALL) {
+            let mut r = wait(-1, flags);
+            if let Ok((0, _)) = r {
+                // Every tracee is running, so this is as good a time as any
+                // to hand over what we have.
+                self.flush();
+                r = wait(-1, libc::__WALL);
+            }
+            match r {
                 Ok(status) => self.handle(status),
                 Err(Errno::EINTR) => continue,
                 Err(_) => break,

@@ -71,6 +71,7 @@ filetap [OPTIONS] -- <COMMAND> [ARGS...]
 | `--show GLOB` | Always list matching paths, unfolded |
 | `-a`, `--all` | Nothing hidden, nothing folded |
 | `-v`, `--verbose` | How often each path was touched, by which programs, and what they tried first |
+| `--live` | Also print each path to stderr as it's first touched (`<---` read, `--->` written, ` >>>` run, ` ?--` not found) |
 | `--sort path` | Sort by path instead of by when each path was first touched |
 | `--json` | Everything, including what's hidden and why |
 | `-o FILE` | Write the report to FILE (default stderr, `-` for stdout) |

@@ -167,8 +167,8 @@ fn report_puts_changes_in_the_right_buckets() {
     let dir = tempdir("report");
     fs::create_dir(dir.join(".git")).unwrap();
     // Same result whether the command stops only on file syscalls or on
-    // every one.
-    for mode in [None, Some("--no-seccomp")] {
+    // every one, and with the live lines on top.
+    for mode in [None, Some("--no-seccomp"), Some("--live")] {
         fs::write(dir.join("old.txt"), "x").unwrap();
         fs::write(dir.join("gone.txt"), "x").unwrap();
         let _ = fs::remove_file(dir.join("new.txt"));
@@ -191,6 +191,10 @@ fn report_puts_changes_in_the_right_buckets() {
             "DELETE\n  ./gone.txt\n",
         ] {
             assert!(report.contains(want), "{mode:?}: no {want:?} in:\n{report}");
+        }
+        if mode == Some("--live") {
+            assert!(report.starts_with(" >>> "), "{report}");
+            assert!(report.contains("\n---> ./new.txt (new)\n"), "{report}");
         }
     }
 }

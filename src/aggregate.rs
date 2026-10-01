@@ -88,6 +88,8 @@ pub struct Aggregator {
     ms: u64,
     pub io_uring: bool,
     pub execs: Vec<Exec>,
+    /// The records the last event was about, for --live.
+    pub touched: Vec<usize>,
 }
 
 /// A successful execve.
@@ -100,6 +102,7 @@ pub struct Exec {
 impl Aggregator {
     /// `ms` is when the event arrived, counted from the start of the run.
     pub fn add(&mut self, ev: &SysEvent, ms: u64) {
+        self.touched.clear();
         self.seq += 1;
         self.ms = ms;
         let ok = ev.result.is_ok();
@@ -291,6 +294,7 @@ impl Aggregator {
         if !r.pids.contains(&pid) {
             r.pids.push(pid);
         }
+        self.touched.push(i);
         Some(i)
     }
 }

@@ -6,6 +6,7 @@ mod dump;
 mod filter;
 mod json;
 mod launch;
+mod live;
 mod text;
 mod zone;
 
@@ -96,13 +97,20 @@ fn main() {
     });
     let mut sink = Sink {
         dump,
+        live: args
+            .live
+            .then(|| live::Live::new(args.all, use_color(args.color, None))),
         agg: Aggregator::default(),
         warnings: Vec::new(),
         procs: Default::default(),
         started: Instant::now(),
     };
 
-    let mut rx = match ptrace::start(&prog, &args.command, &saved, !args.no_seccomp) {
+    let cfg = ptrace::Config {
+        seccomp: !args.no_seccomp,
+        live: args.live,
+    };
+    let mut rx = match ptrace::start(&prog, &args.command, &saved, cfg) {
         Ok(t) => io::BufReader::with_capacity(1 << 16, t),
         Err(e) => {
             eprintln!("filetap: {e:#}");
@@ -114,7 +122,7 @@ fn main() {
 
     let (exit_status, mut procs, mut running) = loop {
         match Msg::read(&mut rx) {
-            Ok(Some(Msg::Event(ev))) => sink.event(&ev),
+            Ok(Some(Msg::Event(ev))) => sink.event(&ev, &mut ctx, &filter),
             Ok(Some(Msg::Warning(w))) => sink.warnings.push(w),
             Ok(Some(Msg::Spawn { parent, child })) => {
                 sink.procs.entry(child).or_default().ppid = Some(parent);
@@ -174,7 +182,7 @@ fn main() {
                     running.clear();
                     break;
                 }
-                Ok(Some(Msg::Event(ev))) => sink.event(&ev),
+                Ok(Some(Msg::Event(ev))) => sink.event(&ev, &mut ctx, &filter),
                 Ok(Some(Msg::Warning(w))) => sink.warnings.push(w),
                 Ok(Some(Msg::Spawn { parent, child })) => {
                     sink.procs.entry(child).or_default().ppid = Some(parent);
@@ -319,6 +327,7 @@ fn report_writer(path: Option<&Path>) -> (Box<dyn Write>, bool) {
 
 struct Sink {
     dump: Option<io::BufWriter<File>>,
+    live: Option<live::Live>,
     agg: Aggregator,
     warnings: Vec<String>,
     procs: std::collections::BTreeMap<i32, json::Proc>,
@@ -326,11 +335,14 @@ struct Sink {
 }
 
 impl Sink {
-    fn event(&mut self, ev: &SysEvent) {
+    fn event(&mut self, ev: &SysEvent, ctx: &mut zone::Context, filter: &filter::Filter) {
         if let Some(d) = &mut self.dump {
             let _ = dump::write_event(d, ev);
         }
         self.agg.add(ev, self.started.elapsed().as_millis() as u64);
+        if let Some(l) = &mut self.live {
+            l.update(&self.agg.records, &self.agg.touched, ctx, filter);
+        }
     }
 }
 

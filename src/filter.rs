@@ -75,12 +75,8 @@ impl Filter {
 
     pub fn apply(&self, records: &[Record], classes: &mut [Class], ctx: &Context) {
         for (r, c) in records.iter().zip(classes.iter_mut()) {
-            let path = OsStr::from_bytes(&r.path);
-            let shown = self.show.is_match(path);
-            let dropped = self.only.as_ref().is_some_and(|o| !o.contains(&c.bucket))
-                || (self.outside && !outside(r, c, ctx))
-                || (!shown && self.hide.is_match(path));
-            if dropped {
+            let shown = self.shows(&r.path);
+            if !self.keeps(&r.path, shown, c.bucket, ctx) {
                 c.hidden = Some(Hidden::Filtered);
             } else if shown {
                 if c.hidden != Some(Hidden::Moved) {
@@ -90,17 +86,29 @@ impl Filter {
             }
         }
     }
+
+    /// Matches --show.
+    pub fn shows(&self, path: &[u8]) -> bool {
+        self.show.is_match(OsStr::from_bytes(path))
+    }
+
+    /// Whether a path in this bucket stays in the report at all.
+    pub fn keeps(&self, path: &[u8], shown: bool, bucket: Bucket, ctx: &Context) -> bool {
+        !(self.only.as_ref().is_some_and(|o| !o.contains(&bucket))
+            || (self.outside && !outside(path, bucket, ctx))
+            || (!shown && self.hide.is_match(OsStr::from_bytes(path))))
+    }
 }
 
 /// Outside the project, not counting the system and toolchains every
 /// program reads. Changes count wherever they are.
-fn outside(r: &Record, c: &Class, ctx: &Context) -> bool {
-    if under(&r.path, &ctx.root) {
+fn outside(path: &[u8], bucket: Bucket, ctx: &Context) -> bool {
+    if under(path, &ctx.root) {
         return false;
     }
-    c.bucket.is_change()
+    bucket.is_change()
         || !matches!(
-            ctx.zone(&r.path),
+            ctx.zone(path),
             Zone::System | Zone::Toolchain | Zone::Virtual
         )
 }
