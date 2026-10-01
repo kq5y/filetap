@@ -273,14 +273,22 @@ impl Report<'_> {
                         line.note = format!("(and {} other dirs)", count(n - 1));
                         line
                     }
-                    Key::Dir(dir) => Line {
-                        text: format!("{}/", self.ctx.display(dir)),
-                        note: if bucket == Bucket::Missing {
-                            format!("({} paths; directory missing)", count(n))
-                        } else {
-                            format!("({} {})", count(n), if n == 1 { "file" } else { "files" })
-                        },
-                    },
+                    Key::Dir(dir) => {
+                        // The directory's own entry, when it was listed, isn't
+                        // one of the files under it.
+                        let n = members
+                            .iter()
+                            .filter(|&&i| self.records[i].path != dir)
+                            .count();
+                        Line {
+                            text: format!("{}/", self.ctx.display(dir)),
+                            note: if bucket == Bucket::Missing {
+                                format!("({} paths; directory missing)", count(n))
+                            } else {
+                                format!("({} {})", count(n), if n == 1 { "file" } else { "files" })
+                            },
+                        }
+                    }
                 }
             })
             .collect()
