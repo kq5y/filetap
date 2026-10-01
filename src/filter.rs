@@ -9,6 +9,7 @@ use globset::{GlobBuilder, GlobSet, GlobSetBuilder};
 use crate::aggregate::Record;
 use crate::classify::{Bucket, Class, Hidden};
 use crate::cli::Args;
+use crate::config::Config;
 use crate::zone::{Context, Zone, escape, under};
 
 pub struct Filter {
@@ -23,7 +24,7 @@ pub struct Filter {
 }
 
 impl Filter {
-    pub fn new(args: &Args, ctx: &Context) -> Result<Filter, String> {
+    pub fn new(args: &Args, config: &Config, ctx: &Context) -> Result<Filter, String> {
         let mut only: Vec<Bucket> = Vec::new();
         let mut described = Vec::new();
         if args.writes {
@@ -49,13 +50,18 @@ impl Filter {
         if !args.hide.is_empty() {
             described.push(format!("--hide {}", args.hide.join(" --hide ")));
         }
+        if !config.hide.is_empty() {
+            described.push(".filetap.toml".to_string());
+        }
+        let hide = [&args.hide[..], &config.hide].concat();
+        let show = [&args.show[..], &config.show].concat();
         Ok(Filter {
             only: (!only.is_empty()).then_some(only),
             outside: args.outside,
-            hide: globs(&args.hide, ctx)?,
-            show: globs(&args.show, ctx)?,
-            hide_pats: args.hide.clone(),
-            show_pats: args.show.clone(),
+            hide: globs(&hide, ctx)?,
+            show: globs(&show, ctx)?,
+            hide_pats: hide,
+            show_pats: show,
             described,
         })
     }

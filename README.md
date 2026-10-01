@@ -82,7 +82,13 @@ filetap [OPTIONS] -- <COMMAND> [ARGS...]
 | `--no-seccomp` | Stop at every syscall; slower, for systems without seccomp |
 
 Globs starting with `/`, `~/` or `./` are absolute, home-relative or
-root-relative. `*.log` matches a file name anywhere.
+root-relative. `*.log` matches a file name anywhere. A `.filetap.toml` in
+the project root adds patterns to every run there:
+
+```toml
+hide = ["./.cache", "*.log"]
+show = ["~/.npmrc"]
+```
 
 filetap exits with the command's status (128+N if it was killed by signal
 N), or 125 if filetap itself failed, 126 if the command couldn't be run,

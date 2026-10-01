@@ -2,6 +2,7 @@ mod aggregate;
 mod backend;
 mod classify;
 mod cli;
+mod config;
 mod dump;
 mod filter;
 mod json;
@@ -54,10 +55,12 @@ fn main() {
         })
     });
     let mut ctx = zone::Context::from_env(root.as_deref());
-    let filter = filter::Filter::new(&args, &ctx).unwrap_or_else(|e| {
-        eprintln!("filetap: {e}");
-        exit(125);
-    });
+    let filter = config::load(&ctx.root)
+        .and_then(|config| filter::Filter::new(&args, &config, &ctx))
+        .unwrap_or_else(|e| {
+            eprintln!("filetap: {e}");
+            exit(125);
+        });
 
     let saved = SavedSignals::capture();
     // Like time(1): Ctrl-C is for the command, which gets it anyway because
